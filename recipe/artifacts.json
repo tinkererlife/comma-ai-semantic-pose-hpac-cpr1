@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "artifacts": [
+    {
+      "path": "artifacts/base/int5_delta_archive.zip",
+      "bytes": 197228,
+      "sha256": "e16abacf3a83062f96139ef980fe95d9fd2061a5ce89d1d31c80dcfe52d65051",
+      "role": "minimal non-circular semantic/pose base"
+    },
+    {
+      "path": "artifacts/caches/gt_cache_600.pt.xz",
+      "bytes": 527296,
+      "sha256": "67fa351ac728332b0e9b186706a6596f3f9b85e15303b55f007473fdec6d248f",
+      "role": "losslessly compressed original semantic target cache",
+      "uncompressed_bytes": 117981133,
+      "uncompressed_sha256": "8248a60da56119eb4b3ad76bfa32f5498dee849eaf4b83b304275064141fd828"
+    },
+    {
+      "path": "artifacts/caches/gt_cache_600_official_ada.pt.xz",
+      "bytes": 526820,
+      "sha256": "233884c672eff22258376cf9532bb69a52017980000a2615bbd917ba7a8ec3dc",
+      "role": "losslessly compressed official Ada target cache",
+      "uncompressed_bytes": 117981301,
+      "uncompressed_sha256": "382d7dfe38b37c0cc5017e5645032faa045af6924db66e0b67549cc96c840195"
+    },
+    {
+      "path": "artifacts/checkpoints/semantic_renderer_w96_b4_qat4_12k.pt",
+      "bytes": 283432,
+      "sha256": "1549607db224ea2c4681738dbcc80d2ba9dd453de72db1cf60309985d0602eaf",
+      "role": "semantic final-tail initialization"
+    },
+    {
+      "path": "artifacts/checkpoints/semantic_renderer_w96_b4_qat4_fixedtau05_tail6k_lr2e7.pt",
+      "bytes": 282352,
+      "sha256": "3948ccfcd44778dc42affee18a10c3f3baa434d1a2eb2345a013146c1dbfb647",
+      "role": "selected semantic renderer"
+    },
+    {
+      "path": "artifacts/checkpoints/archive_carrier_int6_stable_s8k.pt",
+      "bytes": 149160,
+      "sha256": "8f85105aeb3b6bf6a0a8273af2c5df3cebb15c8afa501dd6bf99937a8ff1c127",
+      "role": "carrier coefficient-tail initialization"
+    },
+    {
+      "path": "artifacts/checkpoints/archive_carrier_int6_coefftail_s4k.pt",
+      "bytes": 149242,
+      "sha256": "62f4a91149fae7d07b4e3c8ccb0e83625cfde3e1b52e7cd1a4ead584ce043021",
+      "role": "selected int6 carrier training checkpoint"
+    },
+    {
+      "path": "artifacts/checkpoints/hpac_selfcompress_l1_fastbits_e60.pt",
+      "bytes": 177041,
+      "sha256": "0f4775920aeb2fb419555cc4d68703dd90b88be9d24c82466a99fddc1b1f1aa7",
+      "role": "selected self-compressed integer HPAC checkpoint"
+    },
+    {
+      "path": "artifacts/hpac/hpac_selfcompress_l1_fastbits_e60.bin.xz",
+      "bytes": 15164,
+      "sha256": "ef8bb9d59bdd3916fb77713c11cdcb85e029f01d80b82472a40ab28f7e56a9ee",
+      "role": "exact packed deployment HPAC"
+    },
+    {
+      "path": "artifacts/hpac/hpac_selfcompress_l1_fastbits_e60.tokens.bin",
+      "bytes": 116980,
+      "sha256": "948379872ff81a4e5d948ec301c143be00ebd0033544c8abdfb4af0f4c4a15eb",
+      "role": "exact 600-frame semantic token stream"
+    },
+    {
+      "path": "artifacts/final/archive.zip",
+      "bytes": 191052,
+      "sha256": "0491d5df84fc70b62b3f7ccf8894f5e1b81c616de46a052e4423fc1e18fdc7cd",
+      "role": "canonical CPR1 submission archive"
+    }
+  ],
+  "derived_stages": [
+    {
+      "name": "self-compressed predecessor",
+      "bytes": 194380,
+      "sha256": "f4457de09a6e69c8cd29e886a84705462a8c77dc6978020b11dff52e661a1451",
+      "committed": false
+    },
+    {
+      "name": "CPR1",
+      "bytes": 191052,
+      "sha256": "0491d5df84fc70b62b3f7ccf8894f5e1b81c616de46a052e4423fc1e18fdc7cd",
+      "committed": true
+    }
+  ]
+}

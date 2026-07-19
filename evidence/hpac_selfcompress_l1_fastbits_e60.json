@@ -1,0 +1,643 @@
+{
+  "best_epoch": 40,
+  "best_bpp": 0.007788881900804127,
+  "best_top1_error": 0.0019245995415581598,
+  "estimated_token_bytes": 114852,
+  "estimated_model_bytes": 20175,
+  "estimated_joint_bytes": 135027,
+  "bit_depth_histogram": {
+    "0": 6,
+    "1": 2,
+    "2": 7,
+    "3": 11,
+    "4": 38,
+    "5": 59,
+    "6": 110,
+    "7": 275,
+    "8": 9
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "phase": "continuous",
+      "bpp": 0.00799591279158292,
+      "top1_error": 0.0019705708821614585,
+      "estimated_token_bytes": 117905,
+      "estimated_model_bytes": 27026,
+      "estimated_joint_bytes": 144931,
+      "bit_depth_histogram": {
+        "8": 517
+      },
+      "elapsed_seconds": 23.260578155517578
+    },
+    {
+      "epoch": 2,
+      "phase": "continuous",
+      "bpp": 0.008021710822204042,
+      "top1_error": 0.0019861009385850692,
+      "estimated_token_bytes": 118285,
+      "estimated_model_bytes": 25798,
+      "estimated_joint_bytes": 144083,
+      "bit_depth_histogram": {
+        "7": 61,
+        "8": 456
+      },
+      "elapsed_seconds": 40.43260931968689
+    },
+    {
+      "epoch": 4,
+      "phase": "continuous",
+      "bpp": 0.007913466037543228,
+      "top1_error": 0.0019602457682291667,
+      "estimated_token_bytes": 116689,
+      "estimated_model_bytes": 24866,
+      "estimated_joint_bytes": 141555,
+      "bit_depth_histogram": {
+        "7": 195,
+        "8": 322
+      },
+      "elapsed_seconds": 69.16833162307739
+    },
+    {
+      "epoch": 6,
+      "phase": "continuous",
+      "bpp": 0.007944804781871267,
+      "top1_error": 0.0019767930772569445,
+      "estimated_token_bytes": 117151,
+      "estimated_model_bytes": 24162,
+      "estimated_joint_bytes": 141313,
+      "bit_depth_histogram": {
+        "6": 35,
+        "7": 160,
+        "8": 322
+      },
+      "elapsed_seconds": 97.92434215545654
+    },
+    {
+      "epoch": 8,
+      "phase": "continuous",
+      "bpp": 0.0079088409343887,
+      "top1_error": 0.001958558824327257,
+      "estimated_token_bytes": 116621,
+      "estimated_model_bytes": 23207,
+      "estimated_joint_bytes": 139828,
+      "bit_depth_histogram": {
+        "5": 19,
+        "6": 86,
+        "7": 90,
+        "8": 322
+      },
+      "elapsed_seconds": 126.6873345375061
+    },
+    {
+      "epoch": 10,
+      "phase": "continuous",
+      "bpp": 0.007900792659887627,
+      "top1_error": 0.0019567447238498263,
+      "estimated_token_bytes": 116502,
+      "estimated_model_bytes": 22450,
+      "estimated_joint_bytes": 138952,
+      "bit_depth_histogram": {
+        "4": 12,
+        "5": 10,
+        "6": 145,
+        "7": 91,
+        "8": 259
+      },
+      "elapsed_seconds": 155.46228122711182
+    },
+    {
+      "epoch": 12,
+      "phase": "continuous",
+      "bpp": 0.00788115034815561,
+      "top1_error": 0.0019565836588541666,
+      "estimated_token_bytes": 116213,
+      "estimated_model_bytes": 22419,
+      "estimated_joint_bytes": 138632,
+      "bit_depth_histogram": {
+        "4": 14,
+        "5": 8,
+        "6": 146,
+        "7": 90,
+        "8": 259
+      },
+      "elapsed_seconds": 184.24264574050903
+    },
+    {
+      "epoch": 14,
+      "phase": "continuous",
+      "bpp": 0.007915580546320727,
+      "top1_error": 0.0019662984212239585,
+      "estimated_token_bytes": 116720,
+      "estimated_model_bytes": 21686,
+      "estimated_joint_bytes": 138406,
+      "bit_depth_histogram": {
+        "3": 8,
+        "4": 7,
+        "5": 62,
+        "6": 92,
+        "7": 154,
+        "8": 194
+      },
+      "elapsed_seconds": 213.02725911140442
+    },
+    {
+      "epoch": 16,
+      "phase": "continuous",
+      "bpp": 0.007943048280659505,
+      "top1_error": 0.0019839053683810763,
+      "estimated_token_bytes": 117126,
+      "estimated_model_bytes": 21401,
+      "estimated_joint_bytes": 138527,
+      "bit_depth_histogram": {
+        "2": 6,
+        "3": 2,
+        "4": 7,
+        "5": 65,
+        "6": 89,
+        "7": 282,
+        "8": 66
+      },
+      "elapsed_seconds": 241.81061458587646
+    },
+    {
+      "epoch": 18,
+      "phase": "continuous",
+      "bpp": 0.00792899165490328,
+      "top1_error": 0.0019597964816623265,
+      "estimated_token_bytes": 116918,
+      "estimated_model_bytes": 21056,
+      "estimated_joint_bytes": 137974,
+      "bit_depth_histogram": {
+        "2": 6,
+        "3": 4,
+        "4": 9,
+        "5": 110,
+        "6": 40,
+        "7": 281,
+        "8": 67
+      },
+      "elapsed_seconds": 270.59136962890625
+    },
+    {
+      "epoch": 20,
+      "phase": "continuous",
+      "bpp": 0.007982262952568946,
+      "top1_error": 0.001977174546983507,
+      "estimated_token_bytes": 117704,
+      "estimated_model_bytes": 20666,
+      "estimated_joint_bytes": 138370,
+      "bit_depth_histogram": {
+        "1": 6,
+        "2": 1,
+        "3": 3,
+        "4": 33,
+        "5": 90,
+        "6": 37,
+        "7": 280,
+        "8": 67
+      },
+      "elapsed_seconds": 299.3724970817566
+    },
+    {
+      "epoch": 22,
+      "phase": "continuous",
+      "bpp": 0.00800229536633743,
+      "top1_error": 0.0019782935248480902,
+      "estimated_token_bytes": 117999,
+      "estimated_model_bytes": 20576,
+      "estimated_joint_bytes": 138575,
+      "bit_depth_histogram": {
+        "1": 6,
+        "2": 2,
+        "3": 2,
+        "4": 36,
+        "5": 88,
+        "6": 36,
+        "7": 282,
+        "8": 65
+      },
+      "elapsed_seconds": 328.1615810394287
+    },
+    {
+      "epoch": 24,
+      "phase": "continuous",
+      "bpp": 0.007945164646610768,
+      "top1_error": 0.0019650777180989583,
+      "estimated_token_bytes": 117157,
+      "estimated_model_bytes": 20456,
+      "estimated_joint_bytes": 137613,
+      "bit_depth_histogram": {
+        "0": 6,
+        "2": 2,
+        "3": 2,
+        "4": 38,
+        "5": 88,
+        "6": 34,
+        "7": 280,
+        "8": 67
+      },
+      "elapsed_seconds": 356.946959733963
+    },
+    {
+      "epoch": 26,
+      "phase": "continuous",
+      "bpp": 0.007992755449878541,
+      "top1_error": 0.001979132758246528,
+      "estimated_token_bytes": 117858,
+      "estimated_model_bytes": 20309,
+      "estimated_joint_bytes": 138167,
+      "bit_depth_histogram": {
+        "0": 6,
+        "2": 2,
+        "3": 10,
+        "4": 44,
+        "5": 74,
+        "6": 34,
+        "7": 280,
+        "8": 67
+      },
+      "elapsed_seconds": 385.7285113334656
+    },
+    {
+      "epoch": 28,
+      "phase": "continuous",
+      "bpp": 0.00796607595144136,
+      "top1_error": 0.001978276570638021,
+      "estimated_token_bytes": 117465,
+      "estimated_model_bytes": 20189,
+      "estimated_joint_bytes": 137654,
+      "bit_depth_histogram": {
+        "0": 6,
+        "2": 2,
+        "3": 13,
+        "4": 46,
+        "5": 71,
+        "6": 31,
+        "7": 345,
+        "8": 3
+      },
+      "elapsed_seconds": 414.51319575309753
+    },
+    {
+      "epoch": 30,
+      "phase": "continuous",
+      "bpp": 0.00794131126782903,
+      "top1_error": 0.0019660780164930556,
+      "estimated_token_bytes": 117100,
+      "estimated_model_bytes": 20184,
+      "estimated_joint_bytes": 137284,
+      "bit_depth_histogram": {
+        "0": 6,
+        "2": 2,
+        "3": 13,
+        "4": 46,
+        "5": 72,
+        "6": 30,
+        "7": 345,
+        "8": 3
+      },
+      "elapsed_seconds": 443.3006331920624
+    },
+    {
+      "epoch": 32,
+      "phase": "discrete_qat",
+      "bpp": 0.007850529822486758,
+      "top1_error": 0.001947292751736111,
+      "estimated_token_bytes": 115761,
+      "estimated_model_bytes": 20341,
+      "estimated_joint_bytes": 136102,
+      "bit_depth_histogram": {
+        "0": 6,
+        "1": 1,
+        "2": 1,
+        "3": 15,
+        "4": 43,
+        "5": 66,
+        "6": 36,
+        "7": 339,
+        "8": 10
+      },
+      "elapsed_seconds": 472.09523487091064
+    },
+    {
+      "epoch": 34,
+      "phase": "discrete_qat",
+      "bpp": 0.007860090496296147,
+      "top1_error": 0.0019507344563802083,
+      "estimated_token_bytes": 115902,
+      "estimated_model_bytes": 20255,
+      "estimated_joint_bytes": 136157,
+      "bit_depth_histogram": {
+        "0": 6,
+        "1": 2,
+        "3": 15,
+        "4": 41,
+        "5": 62,
+        "6": 107,
+        "7": 275,
+        "8": 9
+      },
+      "elapsed_seconds": 500.88253927230835
+    },
+    {
+      "epoch": 36,
+      "phase": "discrete_qat",
+      "bpp": 0.007856295516970454,
+      "top1_error": 0.0019532436794704863,
+      "estimated_token_bytes": 115846,
+      "estimated_model_bytes": 20264,
+      "estimated_joint_bytes": 136110,
+      "bit_depth_histogram": {
+        "0": 6,
+        "1": 2,
+        "2": 6,
+        "3": 9,
+        "4": 42,
+        "5": 63,
+        "6": 104,
+        "7": 272,
+        "8": 13
+      },
+      "elapsed_seconds": 529.6796691417694
+    },
+    {
+      "epoch": 38,
+      "phase": "discrete_qat",
+      "bpp": 0.007922061345263872,
+      "top1_error": 0.0019528283013237847,
+      "estimated_token_bytes": 116816,
+      "estimated_model_bytes": 20192,
+      "estimated_joint_bytes": 137008,
+      "bit_depth_histogram": {
+        "0": 6,
+        "1": 2,
+        "2": 6,
+        "3": 10,
+        "4": 40,
+        "5": 65,
+        "6": 103,
+        "7": 276,
+        "8": 9
+      },
+      "elapsed_seconds": 558.4665789604187
+    },
+    {
+      "epoch": 40,
+      "phase": "discrete_qat",
+      "bpp": 0.007788881900804127,
+      "top1_error": 0.0019245995415581598,
+      "estimated_token_bytes": 114852,
+      "estimated_model_bytes": 20175,
+      "estimated_joint_bytes": 135027,
+      "bit_depth_histogram": {
+        "0": 6,
+        "1": 2,
+        "2": 7,
+        "3": 11,
+        "4": 38,
+        "5": 59,
+        "6": 110,
+        "7": 275,
+        "8": 9
+      },
+      "elapsed_seconds": 587.257410287857
+    },
+    {
+      "epoch": 42,
+      "phase": "discrete_qat",
+      "bpp": 0.007876048530590724,
+      "top1_error": 0.0019561767578125,
+      "estimated_token_bytes": 116138,
+      "estimated_model_bytes": 20199,
+      "estimated_joint_bytes": 136337,
+      "bit_depth_histogram": {
+        "0": 6,
+        "1": 2,
+        "2": 8,
+        "3": 10,
+        "4": 41,
+        "5": 57,
+        "6": 111,
+        "7": 269,
+        "8": 13
+      },
+      "elapsed_seconds": 616.0513963699341
+    },
+    {
+      "epoch": 44,
+      "phase": "discrete_qat",
+      "bpp": 0.007803227538030666,
+      "top1_error": 0.0019281768798828124,
+      "estimated_token_bytes": 115064,
+      "estimated_model_bytes": 20235,
+      "estimated_joint_bytes": 135299,
+      "bit_depth_histogram": {
+        "0": 6,
+        "1": 2,
+        "2": 8,
+        "3": 12,
+        "4": 35,
+        "5": 63,
+        "6": 105,
+        "7": 274,
+        "8": 12
+      },
+      "elapsed_seconds": 644.8412954807281
+    },
+    {
+      "epoch": 46,
+      "phase": "discrete_qat",
+      "bpp": 0.007820552753782736,
+      "top1_error": 0.0019388580322265625,
+      "estimated_token_bytes": 115319,
+      "estimated_model_bytes": 20173,
+      "estimated_joint_bytes": 135492,
+      "bit_depth_histogram": {
+        "0": 7,
+        "1": 1,
+        "2": 8,
+        "3": 9,
+        "4": 38,
+        "5": 61,
+        "6": 108,
+        "7": 275,
+        "8": 10
+      },
+      "elapsed_seconds": 673.6411464214325
+    },
+    {
+      "epoch": 48,
+      "phase": "discrete_qat",
+      "bpp": 0.007841933574235991,
+      "top1_error": 0.0019382815890842014,
+      "estimated_token_bytes": 115635,
+      "estimated_model_bytes": 20163,
+      "estimated_joint_bytes": 135798,
+      "bit_depth_histogram": {
+        "0": 8,
+        "2": 8,
+        "3": 9,
+        "4": 36,
+        "5": 67,
+        "6": 105,
+        "7": 273,
+        "8": 11
+      },
+      "elapsed_seconds": 702.6652615070343
+    },
+    {
+      "epoch": 50,
+      "phase": "discrete_qat",
+      "bpp": 0.007834222788814946,
+      "top1_error": 0.001937535603841146,
+      "estimated_token_bytes": 115521,
+      "estimated_model_bytes": 20145,
+      "estimated_joint_bytes": 135666,
+      "bit_depth_histogram": {
+        "0": 8,
+        "2": 8,
+        "3": 10,
+        "4": 41,
+        "5": 58,
+        "6": 107,
+        "7": 273,
+        "8": 12
+      },
+      "elapsed_seconds": 731.4614522457123
+    },
+    {
+      "epoch": 52,
+      "phase": "discrete_qat",
+      "bpp": 0.00782725118841028,
+      "top1_error": 0.0019383917914496528,
+      "estimated_token_bytes": 115418,
+      "estimated_model_bytes": 20103,
+      "estimated_joint_bytes": 135521,
+      "bit_depth_histogram": {
+        "0": 8,
+        "2": 8,
+        "3": 10,
+        "4": 39,
+        "5": 59,
+        "6": 111,
+        "7": 271,
+        "8": 11
+      },
+      "elapsed_seconds": 760.7795579433441
+    },
+    {
+      "epoch": 54,
+      "phase": "discrete_qat",
+      "bpp": 0.007896120557099295,
+      "top1_error": 0.0019497256808810764,
+      "estimated_token_bytes": 116434,
+      "estimated_model_bytes": 20251,
+      "estimated_joint_bytes": 136685,
+      "bit_depth_histogram": {
+        "0": 8,
+        "2": 9,
+        "3": 10,
+        "4": 39,
+        "5": 55,
+        "6": 108,
+        "7": 276,
+        "8": 12
+      },
+      "elapsed_seconds": 790.1746106147766
+    },
+    {
+      "epoch": 56,
+      "phase": "discrete_qat",
+      "bpp": 0.007880009894173695,
+      "top1_error": 0.0019517432318793403,
+      "estimated_token_bytes": 116196,
+      "estimated_model_bytes": 20193,
+      "estimated_joint_bytes": 136389,
+      "bit_depth_histogram": {
+        "0": 8,
+        "2": 9,
+        "3": 8,
+        "4": 39,
+        "5": 63,
+        "6": 105,
+        "7": 271,
+        "8": 14
+      },
+      "elapsed_seconds": 819.5657517910004
+    },
+    {
+      "epoch": 58,
+      "phase": "discrete_qat",
+      "bpp": 0.00786962293628702,
+      "top1_error": 0.0019494798448350694,
+      "estimated_token_bytes": 116043,
+      "estimated_model_bytes": 20094,
+      "estimated_joint_bytes": 136137,
+      "bit_depth_histogram": {
+        "0": 8,
+        "2": 9,
+        "3": 12,
+        "4": 37,
+        "5": 61,
+        "6": 104,
+        "7": 276,
+        "8": 10
+      },
+      "elapsed_seconds": 848.945734500885
+    },
+    {
+      "epoch": 60,
+      "phase": "discrete_qat",
+      "bpp": 0.00786163675468885,
+      "top1_error": 0.0019457753499348958,
+      "estimated_token_bytes": 115925,
+      "estimated_model_bytes": 20112,
+      "estimated_joint_bytes": 136037,
+      "bit_depth_histogram": {
+        "0": 8,
+        "2": 9,
+        "3": 9,
+        "4": 40,
+        "5": 59,
+        "6": 107,
+        "7": 275,
+        "8": 10
+      },
+      "elapsed_seconds": 878.3079349994659
+    }
+  ],
+  "config": {
+    "cache": "/workspace/semantic-rd/gt_cache_600_official_ada.pt",
+    "init": "/workspace/semantic-rd/hpac_p64_exact_from_archive.pt",
+    "epochs": 60,
+    "batch_size": 8,
+    "eval_batch_size": 4,
+    "eval_every": 2,
+    "lr": 0.003,
+    "lr_exponent": 0.0002,
+    "lr_bits": 0.01,
+    "bit_eps": 1e-06,
+    "rate_lambda": 1.0,
+    "qat_fraction": 0.5,
+    "init_bits": 8.0,
+    "channels": 64,
+    "patch": 64,
+    "delta": 2,
+    "frame_dim": 8,
+    "norm_mode": "none",
+    "activation": "relu",
+    "frame_scale": true,
+    "weight_bound": 127,
+    "activation_bound": 127,
+    "weight_scales": true,
+    "weight_exponent_min": -6,
+    "spm": true,
+    "norm_gates": false,
+    "target_mode": "raw",
+    "seed": 20260716,
+    "device": "cuda",
+    "save": "/workspace/semantic-rd/results/hpac_selfcompress_l1_fastbits_e60.pt",
+    "out": "/workspace/semantic-rd/results/hpac_selfcompress_l1_fastbits_e60.json"
+  }
+}

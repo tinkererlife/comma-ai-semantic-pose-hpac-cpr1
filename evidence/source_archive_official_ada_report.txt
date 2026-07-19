@@ -1,0 +1,17 @@
+=== Evaluation config ===
+  batch_size: 16
+  device: cuda
+  num_threads: 2
+  prefetch_queue_depth: 4
+  report: /workspace/official-integer/submissions/semantic_pose_landslide_selfcompress_candidate/report.txt
+  seed: 1234
+  submission_dir: /workspace/official-integer/submissions/semantic_pose_landslide_selfcompress_candidate
+  uncompressed_dir: /workspace/official-integer/videos
+  video_names_file: /workspace/official-integer/public_test_video_names.txt
+=== Evaluation results over 600 samples ===
+  Average PoseNet Distortion: 0.00001967
+  Average SegNet Distortion: 0.00028609
+  Submission file size: 194,380 bytes
+  Original uncompressed size: 37,545,489 bytes
+  Compression Rate: 0.00517719
+  Final score: 100*segnet_dist + √(10*posenet_dist) + 25*rate = 0.17
