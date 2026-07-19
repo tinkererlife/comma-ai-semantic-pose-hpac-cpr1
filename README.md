@@ -1,4 +1,4 @@
-# CPR1 winning recipe
+# CPR1-semantic-pose
 
 This private repository preserves two separate guarantees for the
 `semantic_pose_landslide_selfcompress` submission:
