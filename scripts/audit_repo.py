@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -39,6 +40,55 @@ def included_files() -> list[Path]:
         path
         for path in ROOT.rglob("*")
         if path.is_file() and not (set(path.relative_to(ROOT).parts) & IGNORED_PARTS)
+    )
+
+
+def unreachable_code_files() -> list[str]:
+    """Find Python modules outside every retained executable/test lineage."""
+    code_root = ROOT / "code"
+    modules = {
+        path.stem: path
+        for path in code_root.glob("*.py")
+    }
+    entrypoints = [
+        *sorted((ROOT / "scripts").glob("*.py")),
+        *sorted((ROOT / "scripts").glob("*.sh")),
+        *sorted((ROOT / "tests").glob("*.py")),
+        code_root / "test_carrier_codec.py",
+    ]
+    reachable: set[str] = set()
+
+    def add_imports(tree: ast.AST) -> None:
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [alias.name.split(".")[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module.split(".")[0]]
+            reachable.update(name for name in names if name in modules)
+
+    for entrypoint in entrypoints:
+        text = entrypoint.read_text()
+        reachable.update(
+            match
+            for match in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\.py\b", text)
+            if match in modules
+        )
+        if entrypoint.suffix == ".py":
+            add_imports(ast.parse(text, filename=str(entrypoint)))
+
+    previous_size = -1
+    while previous_size != len(reachable):
+        previous_size = len(reachable)
+        for name in tuple(reachable):
+            add_imports(ast.parse(
+                modules[name].read_text(),
+                filename=str(modules[name]),
+            ))
+    return sorted(
+        str(path.relative_to(ROOT))
+        for name, path in modules.items()
+        if name not in reachable
     )
 
 
@@ -89,6 +139,12 @@ def main() -> None:
             if pattern.search(text):
                 failures.append(f"{label} pattern in {path.relative_to(ROOT)}")
 
+    unreachable = unreachable_code_files()
+    if unreachable:
+        failures.append(
+            "unreachable Python code: " + ", ".join(unreachable)
+        )
+
     if failures:
         print("\n".join(f"ERROR: {message}" for message in failures), file=sys.stderr)
         raise SystemExit(1)
@@ -102,6 +158,7 @@ def main() -> None:
                 "artifact_count": len(artifact_lock["artifacts"]),
                 "duplicate_groups": 0,
                 "secret_patterns": 0,
+                "unreachable_code_files": 0,
             },
             indent=2,
         )

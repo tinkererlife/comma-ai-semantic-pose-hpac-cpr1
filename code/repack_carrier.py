@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repack the frozen submission archive with the lossless CPR1 carrier codec."""
+"""Repack a legacy carrier with the lossless CPR1 carrier codec."""
 
 from __future__ import annotations
 
@@ -93,9 +93,12 @@ def unpack_signed_int12(
     return values[:count], blob[byte_count:]
 
 
-def read_payload(path: Path) -> bytes:
+def read_payload(path: Path, require_canonical_source: bool = True) -> bytes:
     archive_bytes = path.read_bytes()
-    if sha256(archive_bytes) != SOURCE_ARCHIVE_SHA256:
+    if (
+        require_canonical_source
+        and sha256(archive_bytes) != SOURCE_ARCHIVE_SHA256
+    ):
         raise ValueError("source archive does not match the frozen canonical SHA-256")
     with zipfile.ZipFile(path) as archive:
         infos = archive.infolist()
@@ -212,9 +215,10 @@ def projected_score(
 def repack(
     source_archive: Path,
     output_archive: Path,
+    require_canonical_source: bool = True,
 ) -> dict:
     source_archive_bytes = source_archive.read_bytes()
-    payload = read_payload(source_archive)
+    payload = read_payload(source_archive, require_canonical_source)
     source_compressed, models, tokens = split_payload(payload)
     semantic, carrier, hpac, semantic_bytes, carrier_bytes = split_models(models)
     (
@@ -266,24 +270,26 @@ def repack(
     write_deterministic_zip(output_archive, rebuilt_payload)
     output_archive_bytes = output_archive.read_bytes()
     output_archive_sha256 = sha256(output_archive_bytes)
-    if len(output_archive_bytes) != EXPECTED_ARCHIVE_BYTES:
-        raise RuntimeError(
-            f"CPR1 archive length mismatch: {len(output_archive_bytes)} "
-            f"!= {EXPECTED_ARCHIVE_BYTES}"
-        )
-    if output_archive_sha256 != EXPECTED_ARCHIVE_SHA256:
-        raise RuntimeError(
-            f"CPR1 archive SHA-256 mismatch: {output_archive_sha256} "
-            f"!= {EXPECTED_ARCHIVE_SHA256}"
-        )
+    if require_canonical_source:
+        if len(output_archive_bytes) != EXPECTED_ARCHIVE_BYTES:
+            raise RuntimeError(
+                f"CPR1 archive length mismatch: {len(output_archive_bytes)} "
+                f"!= {EXPECTED_ARCHIVE_BYTES}"
+            )
+        if output_archive_sha256 != EXPECTED_ARCHIVE_SHA256:
+            raise RuntimeError(
+                f"CPR1 archive SHA-256 mismatch: {output_archive_sha256} "
+                f"!= {EXPECTED_ARCHIVE_SHA256}"
+            )
     semantic_pose = b"".join([
         struct.pack("<II", semantic_bytes, len(compact_carrier)),
         semantic,
         compact_carrier,
     ])
-    return {
+    result = {
         "schema_version": 1,
         "format": "CPR1",
+        "canonical_source_required": require_canonical_source,
         "source": {
             "archive_bytes": len(source_archive_bytes),
             "archive_sha256": sha256(source_archive_bytes),
@@ -316,7 +322,9 @@ def repack(
             "coefficient_symbols": COEFFICIENT_COUNT,
             "lossless_carrier_roundtrip": True,
         },
-        "projection_from_displayed_metrics": {
+    }
+    if require_canonical_source:
+        result["projection_from_displayed_metrics"] = {
             "ada": projected_score(
                 len(output_archive_bytes),
                 segmentation=0.00028609,
@@ -327,8 +335,8 @@ def repack(
                 segmentation=0.00029607,
                 pose_mse=0.00001981,
             ),
-        },
-    }
+        }
+    return result
 
 
 def parse_args() -> argparse.Namespace:
@@ -336,12 +344,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("source_archive", type=Path)
     parser.add_argument("output_archive", type=Path)
     parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--allow-noncanonical-source",
+        action="store_true",
+        help=(
+            "accept a freshly trained legacy archive after validating its "
+            "structure and lossless CPR1 symbol round-trip"
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    report = repack(args.source_archive, args.output_archive)
+    report = repack(
+        args.source_archive,
+        args.output_archive,
+        require_canonical_source=not args.allow_noncanonical_source,
+    )
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)

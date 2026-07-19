@@ -1,74 +1,93 @@
-# Historical training recipe
+# Selected CPR1 training lineage
 
-Run these commands from the repository root in the official challenge
-environment at commit `d3f688f84f555c5aaebee7d2c4203efc8a9051e2`.
+The executable source of truth is [`../scripts/e2e.py`](../scripts/e2e.py).
+It resolves all commands to absolute paths, writes only below `--run-dir`, and
+hashes every selected input and output.
 
-The exact command lines are implemented by `scripts/train.sh`. The two cache
-archives expand under ignored `work/caches/`; no generated training output is
-committed.
+## Environment boundary
 
-## Prepare
+- Official challenge commit:
+  `d3f688f84f555c5aaebee7d2c4203efc8a9051e2`
+- Official dependency group: `cu128`
+- Python: 3.11 (from the pinned challenge `.python-version`)
+- Target extraction: CUDA DALI path, seed 1234, 16-sample batches
+- Training seeds: retained per stage in the runner
+- TF32: disabled in the exact coefficient and integer-HPAC rails
 
-```bash
-CHALLENGE_ROOT=/path/to/challenge bash scripts/train.sh prepare
-```
+The strict run generates one fresh target cache directly from the raw challenge
+video and uses it throughout. It never expands or reads the two frozen cache
+fixtures in `artifacts/caches/`.
 
-This restores and verifies:
+## Stage groups
 
-| Cache | Bytes | SHA-256 |
-| --- | ---: | --- |
-| Original semantic cache | 117,981,133 | `8248a60da56119eb4b3ad76bfa32f5498dee849eaf4b83b304275064141fd828` |
-| Official Ada cache | 117,981,301 | `382d7dfe38b37c0cc5017e5645032faa045af6924db66e0b67549cc96c840195` |
+| Stages | Output |
+| --- | --- |
+| `01` | Fresh 600-pair official SegNet/PoseNet cache |
+| `02`–`08` | Width-96, four-block, 4-bit semantic renderer |
+| `09`–`10` | Random-init 12-direction pose-basis pilot |
+| `11`–`20` | Full 600-row carrier and CPU exact-code polish |
+| `21`–`25` | Retargeted carrier for the final semantic renderer |
+| `26`–`30` | Exact int12 searches and anchor-preserving refinements |
+| `31`–`32` | Six-bit carrier stabilization and coefficient tail |
+| `33`–`40` | Random-init integer HPAC through patch-64 migration |
+| `41` | Joint HPAC model-rate/token-rate self-compression |
+| `42`–`44` | Exact HPAC packing, arithmetic encode, and decode equality |
+| `45` | Fresh legacy predecessor with a deployed five-bit basis |
+| `46` | Lossless CPR1 Huffman/Rice carrier repack |
+| `47` | Minimal runnable submission staging |
+| `48`–`49` | Official 600-sample evaluation and score validation |
 
-## Semantic renderer
+## Historically selected intermediate boundaries
 
-The final 6,000-step, 4-bit QAT tail starts from
-`semantic_renderer_w96_b4_qat4_12k.pt` and uses the original target cache.
-Its authoritative output is the included
-`semantic_renderer_w96_b4_qat4_fixedtau05_tail6k_lr2e7.pt`.
+Several winning checkpoints were selected before the configured scheduler
+horizon. The runner preserves the original horizon while stopping at the
+selected boundary:
 
-## Pose carrier
+| Stage | Scheduler horizon | Selected boundary |
+| --- | ---: | ---: |
+| pose hard-mining | 4,000 steps | step 750 latest |
+| final-semantic coefficient rescue | 2,000 steps | step 1,000 latest |
+| basis adaptation | 2,000 steps | step 250 best |
+| final-semantic CPU polish | 400 steps | step 100 best |
+| HPAC long initialization | 100 epochs | epoch 60 latest |
 
-The final 4,000-step coefficient tail uses:
+This distinction matters: shortening the configured horizon would change the
+cosine learning-rate trajectory and would not be the selected recipe.
 
-- the authoritative final semantic checkpoint;
-- the official Ada target cache;
-- `archive_carrier_int6_stable_s8k.pt` as initialization;
-- 6-bit basis, 12-bit coefficients, amplitude 64;
-- frozen basis, exact raw PoseNet metric loss, and seed `20260722`.
+## Final serialization contract
 
-The authoritative output is
-`archive_carrier_int6_coefftail_s4k.pt`.
+The final carrier checkpoint is trained and evaluated with a six-bit basis.
+The predecessor packer deploys it at five bits with 12-bit coefficients, as in
+the winning submission. The predecessor is then converted to CPR1:
 
-## Integer HPAC
+- basis codes: canonical Huffman coding;
+- coefficient series: exact Rice coding;
+- scales and all decoded symbols: bit-for-bit preserved;
+- ZIP: one stored member named `p`.
 
-The 60-epoch self-compression run uses:
+For a fresh predecessor, `repack_carrier.py` requires the explicit
+`--allow-noncanonical-source` flag. The canonical frozen path remains
+hash-locked by default.
 
-- an initialization extracted from the base archive;
-- the official Ada semantic maps;
-- 64 channels, patch 64, delta 2, frame embedding 8;
-- raw-token mode, per-channel learned bit depths, and seed `20260716`.
+## Fresh-run acceptance
 
-Epoch 40 was selected. The authoritative output is
-`hpac_selfcompress_l1_fastbits_e60.pt`.
+A fresh run is complete only when:
 
-The `pack-hpac` and `encode-tokens` actions reproduce the deployment
-serialization and the arithmetic-coded stream from the authoritative
-checkpoint. Encoding requires the exact integer inference path and is expected
-to produce:
+1. all 600 arithmetic-decoded token maps equal the fresh official cache;
+2. CPR1 round-trips every carrier symbol exactly;
+3. the staged submission contains only the archive and required inflate
+   runtime;
+4. official `evaluate.sh` completes over 600 samples;
+5. the reported archive size matches the actual archive;
+6. the full-precision score is recomputed from the official component metrics.
 
-```text
-packed HPAC:
-ef8bb9d59bdd3916fb77713c11cdcb85e029f01d80b82472a40ab28f7e56a9ee
+CUDA optimization is not bitwise reproducible across all GPU/library builds.
+Therefore the frozen archive hash is a regression oracle, while a fresh run's
+official report is its score oracle.
 
-token stream:
-948379872ff81a4e5d948ec301c143be00ebd0033544c8abdfb4af0f4c4a15eb
-```
+## Retained-boundary replay
 
-## Reproducibility claim
-
-The commands, input caches, initialization checkpoints, selected outputs,
-packing artifacts, and reports are retained. CUDA optimization can vary by
-hardware and library build, so freshly trained tensors are not claimed to be
-bit-identical across machines. The included selected checkpoints and final
-archive chain are the frozen truth.
+[`../scripts/train.sh`](../scripts/train.sh) remains available for the small
+historical replay that starts from retained selected checkpoints and caches.
+It is useful for auditing the final semantic, carrier, and HPAC tails, but it is
+not raw-video E2E and must not be described as such.

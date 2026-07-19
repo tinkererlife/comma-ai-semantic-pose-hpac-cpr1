@@ -32,6 +32,10 @@ PYTHONPYCACHEPREFIX="${SCRATCH}/pycache" \
 bash scripts/reproduce.sh "${SCRATCH}/reproduction"
 
 SEMANTIC_POSE_SOURCE_ARCHIVE="${SCRATCH}/reproduction/predecessor/archive.zip" \
-  "${PYTHON_BIN}" -m pytest -q code/test_carrier_codec.py tests/test_provenance.py
+  "${PYTHON_BIN}" -m pytest -q \
+    code/test_carrier_codec.py \
+    tests/test_e2e_plan.py \
+    tests/test_official_report.py \
+    tests/test_provenance.py
 
 echo "CPR1 repository verification passed"

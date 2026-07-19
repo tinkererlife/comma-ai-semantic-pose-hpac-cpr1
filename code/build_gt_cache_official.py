@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -21,6 +22,7 @@ def main() -> None:
     parser.add_argument("--dataset", choices=("dali", "av"), default="dali")
     parser.add_argument("--reference-cache", type=Path)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--report", type=Path)
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -64,9 +66,15 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(result, args.out)
 
+    digest = hashlib.sha256()
+    with args.out.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
     report = {
         "pairs": result["pose"].shape[0],
         "elapsed_seconds": time.time() - started,
+        "cache_bytes": args.out.stat().st_size,
+        "cache_sha256": digest.hexdigest(),
         "pose_min": result["pose"].amin(0).tolist(),
         "pose_max": result["pose"].amax(0).tolist(),
     }
@@ -83,7 +91,11 @@ def main() -> None:
             "reference_pose_max_abs": float(pose_delta.abs().max()),
             "reference_pose_dim_mse": pose_delta.square().mean(0).tolist(),
         })
-    print(json.dumps(report, indent=2), flush=True)
+    text = json.dumps(report, indent=2) + "\n"
+    if args.report is not None:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(text)
+    print(text, end="", flush=True)
 
 
 if __name__ == "__main__":

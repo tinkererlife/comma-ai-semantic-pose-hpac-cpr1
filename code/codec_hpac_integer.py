@@ -159,6 +159,11 @@ def main() -> None:
     parser.add_argument("--tokens-out", type=Path)
     parser.add_argument("--decode-from", type=Path)
     parser.add_argument("--raw-out", type=Path)
+    parser.add_argument(
+        "--require-exact",
+        action="store_true",
+        help="fail unless decoded tokens exactly match --cache",
+    )
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
 
@@ -184,6 +189,12 @@ def main() -> None:
                 args.cache, map_location="cpu", weights_only=False
             )["seg"][:args.frames].to(torch.uint8)
             result["verified_exact"] = bool(torch.equal(output, expected))
+            if args.require_exact and not result["verified_exact"]:
+                raise RuntimeError(
+                    "decoded tokens differ from the requested target cache"
+                )
+        elif args.require_exact:
+            parser.error("--require-exact requires --cache")
         if args.raw_out is not None:
             args.raw_out.parent.mkdir(parents=True, exist_ok=True)
             args.raw_out.write_bytes(raw)

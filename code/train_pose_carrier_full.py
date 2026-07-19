@@ -187,6 +187,14 @@ def main() -> None:
     parser.add_argument("--reuse-master-cache", action="store_true")
     parser.add_argument("--cache-masters-on-device", action="store_true")
     parser.add_argument("--steps", type=int, default=20000)
+    parser.add_argument(
+        "--stop-after-step",
+        type=int,
+        help=(
+            "stop early while retaining --steps as the cosine-schedule horizon; "
+            "used for historically selected intermediate checkpoints"
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=12)
     parser.add_argument("--eval-batch-size", type=int, default=12)
     parser.add_argument("--render-batch-size", type=int, default=4)
@@ -213,6 +221,11 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--save", type=Path, required=True)
     args = parser.parse_args()
+    if args.steps < 1:
+        raise ValueError("--steps must be positive")
+    stop_after = args.stop_after_step or args.steps
+    if not 1 <= stop_after <= args.steps:
+        raise ValueError("--stop-after-step must be in [1, --steps]")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -289,7 +302,7 @@ def main() -> None:
     history = []
     best = {"mean": float("inf"), "basis": None, "coeff": None}
 
-    for step in range(1, args.steps + 1):
+    for step in range(1, stop_after + 1):
         if cursor + args.batch_size > N_TOTAL_PAIRS:
             if sampling_weights is None:
                 order = torch.randperm(N_TOTAL_PAIRS, generator=generator)
@@ -363,7 +376,7 @@ def main() -> None:
             }
             print(json.dumps(record), flush=True)
 
-        if step % args.eval_every == 0 or step == args.steps:
+        if step % args.eval_every == 0 or step == stop_after:
             basis_q, _, _ = quantize_basis(raw_basis.detach(), args.basis_bits)
             coeff_q, _, _ = quantize_coeff(coeff.weight.detach(), args.coeff_bits)
             full_mse = evaluate_all(

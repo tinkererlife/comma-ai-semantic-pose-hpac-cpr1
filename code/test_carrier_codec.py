@@ -287,6 +287,15 @@ def test_frozen_archive_repack_and_decoded_models_are_exact(tmp_path):
     assert sha256(output.read_bytes()) == EXPECTED_ARCHIVE_SHA256
     assert report["payload"]["carrier_sha256"] == EXPECTED_CARRIER_SHA256
     assert report["payload"]["lossless_carrier_roundtrip"]
+    generic_output = tmp_path / "generic.zip"
+    generic_report = repack_carrier.repack(
+        source,
+        generic_output,
+        require_canonical_source=False,
+    )
+    assert generic_output.read_bytes() == output.read_bytes()
+    assert generic_report["canonical_source_required"] is False
+    assert "projection_from_displayed_metrics" not in generic_report
 
     spec = importlib.util.spec_from_file_location(
         "semantic_pose_landslide_selfcompress_inflate",

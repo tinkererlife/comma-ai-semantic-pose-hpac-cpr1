@@ -1,8 +1,11 @@
 # CPR1 winning recipe
 
-This private preservation repository isolates the semantic-renderer, pose-carrier,
-integer-HPAC, and CPR1 code path that produced the
-`semantic_pose_landslide_selfcompress` submission.
+This private repository preserves two separate guarantees for the
+`semantic_pose_landslide_selfcompress` submission:
+
+1. a byte-exact rebuild of the frozen 191,052-byte CPR1 winner; and
+2. a strict, non-circular reconstruction of the selected training lineage from
+   the raw challenge video through official scoring.
 
 The canonical charged artifact is:
 
@@ -12,12 +15,105 @@ sha256:  0491d5df84fc70b62b3f7ccf8894f5e1b81c616de46a052e4423fc1e18fdc7cd
 member:  p
 ```
 
-## What is exact
+## Full raw-video E2E
 
-`scripts/reproduce.sh` starts from the included 197,228-byte int5 semantic/pose
-archive, installs the final packed HPAC model and exact token stream, and then
-applies the CPR1 Huffman/Rice carrier repack. It must reproduce both frozen
-stage hashes:
+[`scripts/e2e.py`](scripts/e2e.py) is the source of truth. Its 49 resumable
+stages perform:
+
+```text
+raw 0.mkv
+  -> official 600-pair SegNet/PoseNet targets
+  -> semantic renderer from random initialization
+  -> pose basis and 600 coefficient rows from the selected pilot lineage
+  -> integer HPAC from random initialization
+  -> exact arithmetic token stream
+  -> fresh legacy predecessor archive
+  -> lossless CPR1 Huffman/Rice repack
+  -> minimal submission directory
+  -> official 600-sample evaluation and full-precision score check
+```
+
+The runner rejects:
+
+- any training input under this repository's frozen `artifacts/` tree;
+- a challenge checkout other than commit
+  `d3f688f84f555c5aaebee7d2c4203efc8a9051e2`;
+- tracked modifications in the pinned challenge checkout;
+- missing Git LFS video/model files;
+- a run outside Python 3.11, missing CUDA/DALI dependencies, or no CUDA GPU;
+- fewer than 10 GiB of free working space;
+- a token decode that differs from the freshly extracted semantic maps;
+- a partial, malformed, or archive-size-mismatched official report.
+
+Prepare the pinned official environment:
+
+```bash
+git clone https://github.com/commaai/comma_video_compression_challenge.git
+cd comma_video_compression_challenge
+git checkout --detach d3f688f84f555c5aaebee7d2c4203efc8a9051e2
+git lfs install
+git lfs pull
+uv sync --group cu128
+```
+
+Preview every resolved command without training:
+
+```bash
+CHALLENGE=/path/to/comma_video_compression_challenge
+RECIPE=/path/to/cpr1-winning-recipe
+
+cd "$CHALLENGE"
+uv run --group cu128 python "$RECIPE/scripts/e2e.py" plan \
+  --challenge-root "$CHALLENGE" \
+  --run-dir "$RECIPE/work/e2e"
+```
+
+Run the complete pipeline:
+
+```bash
+uv run --group cu128 python "$RECIPE/scripts/e2e.py" run \
+  --challenge-root "$CHALLENGE" \
+  --run-dir "$RECIPE/work/e2e"
+```
+
+Every completed stage records its command, input/output SHA-256 hashes, elapsed
+time, and log. Re-running the same command verifies and skips valid stages.
+Inspect progress or resume at a named boundary:
+
+```bash
+uv run --group cu128 python "$RECIPE/scripts/e2e.py" status \
+  --challenge-root "$CHALLENGE" \
+  --run-dir "$RECIPE/work/e2e"
+
+uv run --group cu128 python "$RECIPE/scripts/e2e.py" run \
+  --challenge-root "$CHALLENGE" \
+  --run-dir "$RECIPE/work/e2e" \
+  --from-stage 33_hpac_smoke
+```
+
+Successful completion leaves:
+
+```text
+work/e2e/submission/archive.zip
+work/e2e/submission/report.txt
+work/e2e/reports/49_official_metrics.json
+work/e2e/e2e-manifest.json
+```
+
+This reproduces the selected method and all data dependencies from raw video.
+Fresh CUDA optimization is hardware- and software-sensitive, so it does not
+promise the same checkpoint bytes, archive bytes, or score as the frozen
+winner. The final `report.txt`, produced by the official evaluator, is the
+truth for a fresh run.
+
+See [`recipe/TRAINING.md`](recipe/TRAINING.md) for the stage groups and exact
+selection boundaries.
+
+## Frozen byte-exact rebuild
+
+[`scripts/reproduce.sh`](scripts/reproduce.sh) starts from the retained
+197,228-byte int5 semantic/pose archive, installs the frozen final HPAC model
+and exact token stream, then applies CPR1. It must reproduce:
 
 ```text
 194380 bytes  f4457de09a6e69c8cd29e886a84705462a8c77dc6978020b11dff52e661a1451
@@ -30,59 +126,25 @@ Run the complete local integrity suite:
 bash scripts/verify.sh
 ```
 
-That checks every retained artifact, audits repository size, duplicates, and
-common secret formats, rebuilds CPR1 byte-for-byte, and runs the CPR1 golden,
-randomized, and malformed-stream tests.
+It audits size, duplicates, common secret formats, all retained artifact
+hashes, the full frozen rebuild, CPR1 randomized/malformed-stream tests, the
+strict E2E dependency graph, and official-report parsing.
 
 ## Repository map
 
 | Path | Purpose |
 | --- | --- |
-| `code/` | Exact production trainers, packers, codec, repacker, and submission runtime |
-| `artifacts/checkpoints/` | Canonical semantic, carrier, and HPAC stage boundaries |
-| `artifacts/caches/` | Two exact 113 MB target caches, losslessly XZ-compressed to about 515 KB each |
-| `artifacts/base/` | Minimal non-circular int5 archive needed to rebuild the predecessor |
-| `artifacts/hpac/` | Exact packed HPAC and 600-frame arithmetic-coded token stream |
-| `artifacts/final/` | Canonical CPR1 archive |
-| `evidence/` | Training reports and official source-archive validation records |
-| `recipe/` | Provenance, artifact lock, and exact historical commands |
-| `scripts/` | Reproduction, training replay, and audit entry points |
-
-## Training replay
-
-The historical commands are encoded in `scripts/train.sh` and explained in
-[`recipe/TRAINING.md`](recipe/TRAINING.md). They run inside the official
-challenge environment at commit
-`d3f688f84f555c5aaebee7d2c4203efc8a9051e2`.
-
-Examples:
-
-```bash
-CHALLENGE_ROOT=/path/to/comma_video_compression_challenge \
-  bash scripts/train.sh prepare
-
-CHALLENGE_ROOT=/path/to/comma_video_compression_challenge \
-  bash scripts/train.sh semantic
-
-CHALLENGE_ROOT=/path/to/comma_video_compression_challenge \
-  bash scripts/train.sh carrier
-
-CHALLENGE_ROOT=/path/to/comma_video_compression_challenge \
-  bash scripts/train.sh hpac
-```
-
-The included checkpoints are the authoritative stage boundaries. CUDA training
-is hardware-sensitive, so a replay is not represented as a promise of a
-byte-identical newly trained checkpoint. The final archive assembly is
-byte-identical and is enforced as such.
+| `scripts/e2e.py` | Strict raw-video-to-official-score runner |
+| `code/` | Trainers, packers, exact codecs, submission runtime, and validators |
+| `recipe/` | Exact stage map, provenance, and frozen artifact lock |
+| `artifacts/` | Frozen regression fixtures only; forbidden as strict E2E inputs |
+| `evidence/` | Preserved reports for the frozen historical artifact |
+| `scripts/train.sh` | Short retained-boundary replay, not the full E2E |
+| `scripts/reproduce.sh` | Byte-exact frozen CPR1 reconstruction |
 
 ## Deliberate exclusions
 
-This repository does not duplicate public challenge videos, evaluator weights,
-the multi-gigabyte inflated output, generated camera-frame master caches,
-individual `p` payload copies, or the reproducible 194,380-byte predecessor.
-It also omits unrelated probes and failed experiments. The retained repository
-is under 5 MB and has no Git LFS dependency.
-
-See [`recipe/PROVENANCE.md`](recipe/PROVENANCE.md) for the audited lineage and
-the one upstream record inconsistency that was intentionally not propagated.
+The repository does not duplicate public challenge videos or evaluator
+weights, generated camera-frame caches, inflated raw output, or fresh training
+runs. Generated state stays under ignored `work/`. The repository remains
+under 5 MB and does not require Git LFS.
