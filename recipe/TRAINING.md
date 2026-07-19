@@ -39,7 +39,7 @@ fixtures in `artifacts/caches/`.
 
 ## Historically selected intermediate boundaries
 
-Several winning checkpoints were selected before the configured scheduler
+Several deployed checkpoints were selected before the configured scheduler
 horizon. The runner preserves the original horizon while stopping at the
 selected boundary:
 
@@ -58,7 +58,7 @@ cosine learning-rate trajectory and would not be the selected recipe.
 
 The final carrier checkpoint is trained and evaluated with a six-bit basis.
 The predecessor packer deploys it at five bits with 12-bit coefficients, as in
-the winning submission. The predecessor is then converted to CPR1:
+the frozen submission artifact. The predecessor is then converted to CPR1:
 
 - basis codes: canonical Huffman coding;
 - coefficient series: exact Rice coding;

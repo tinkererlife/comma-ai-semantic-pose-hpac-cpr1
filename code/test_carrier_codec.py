@@ -298,7 +298,7 @@ def test_frozen_archive_repack_and_decoded_models_are_exact(tmp_path):
     assert "projection_from_displayed_metrics" not in generic_report
 
     spec = importlib.util.spec_from_file_location(
-        "semantic_pose_landslide_selfcompress_inflate",
+        "semantic_pose_hpac_cpr1_inflate",
         HERE / "inflate.py",
     )
     assert spec is not None and spec.loader is not None

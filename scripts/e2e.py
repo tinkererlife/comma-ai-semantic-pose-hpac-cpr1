@@ -1627,7 +1627,7 @@ def frozen_guard(stages: list[Stage]) -> None:
             f"  {name}: {path}" for name, path in violations
         )
         raise RuntimeError(
-            "strict E2E may not consume frozen winning artifacts:\n" + details
+            "strict E2E may not consume frozen reference artifacts:\n" + details
         )
 
 

@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software or reproduction package, please cite this
+  repository and the upstream work listed in LINEAGE_AND_CITATIONS.md.
+title: semantic-pose-HPAC_CPR1 reproducibility package
+type: software
+authors:
+  - family-names: Fayed
+    given-names: Fesal
+    alias: fesalfayed
+version: 1.0.0
+date-released: "2026-07-19"
+repository-code: https://github.com/fesalfayed/comma-ai-semantic-pose-hpac-cpr1
+url: https://github.com/commaai/comma_video_compression_challenge/pull/130
+license: MIT
+abstract: >-
+  Byte-exact reconstruction and strict raw-video-to-official-score recipe for
+  the semantic-pose-HPAC_CPR1 comma video compression challenge submission.

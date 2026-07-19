@@ -32,7 +32,7 @@ def test_full_graph_is_ordered_non_circular_and_complete(tmp_path):
         produced.update(stage.outputs)
 
 
-def test_full_graph_never_consumes_frozen_winner_artifacts(tmp_path):
+def test_full_graph_never_consumes_frozen_reference_artifacts(tmp_path):
     value = pipeline(tmp_path)
     frozen = (ROOT / "artifacts").resolve()
     for stage in value.stages:

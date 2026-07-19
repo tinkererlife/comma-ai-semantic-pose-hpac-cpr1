@@ -1,11 +1,25 @@
-# CPR1-semantic-pose
+# semantic-pose-HPAC_CPR1
 
-This private repository preserves two separate guarantees for the
-`semantic_pose_landslide_selfcompress` submission:
+This is the public reproducibility repository for
+[`semantic-pose-HPAC_CPR1`](https://github.com/commaai/comma_video_compression_challenge/pull/130).
+It preserves two separate guarantees:
 
-1. a byte-exact rebuild of the frozen 191,052-byte CPR1 winner; and
+1. a byte-exact rebuild of the frozen 191,052-byte CPR1 submission artifact;
+   and
 2. a strict, non-circular reconstruction of the selected training lineage from
    the raw challenge video through official scoring.
+
+The canonical archive, submission runtime, and official review request are in
+[PR #130](https://github.com/commaai/comma_video_compression_challenge/pull/130).
+The complete predecessor attribution and originality boundaries are in
+[`LINEAGE_AND_CITATIONS.md`](LINEAGE_AND_CITATIONS.md). A narrative technical
+write-up is available at
+<https://fesalfayed.com/blog/semantic-pose-compression/>.
+
+The completed 600-sample RTX 2000 Ada evaluation reports a displayed score of
+`0.17`. The final challenge-hosted `linux-nvidia-t4` evaluation remains
+pending; this repository does not present the Ada result as an official T4
+result.
 
 The canonical charged artifact is:
 
@@ -60,7 +74,7 @@ Preview every resolved command without training:
 
 ```bash
 CHALLENGE=/path/to/comma_video_compression_challenge
-RECIPE=/path/to/cpr1-winning-recipe
+RECIPE=/path/to/comma-ai-semantic-pose-hpac-cpr1
 
 cd "$CHALLENGE"
 uv run --group cu128 python "$RECIPE/scripts/e2e.py" plan \
@@ -103,8 +117,8 @@ work/e2e/e2e-manifest.json
 This reproduces the selected method and all data dependencies from raw video.
 Fresh CUDA optimization is hardware- and software-sensitive, so it does not
 promise the same checkpoint bytes, archive bytes, or score as the frozen
-winner. The final `report.txt`, produced by the official evaluator, is the
-truth for a fresh run.
+reference artifact. The final `report.txt`, produced by the official
+evaluator, is the truth for a fresh run.
 
 See [`recipe/TRAINING.md`](recipe/TRAINING.md) for the stage groups and exact
 selection boundaries.
@@ -141,6 +155,8 @@ strict E2E dependency graph, and official-report parsing.
 | `evidence/` | Preserved reports for the frozen historical artifact |
 | `scripts/train.sh` | Short retained-boundary replay, not the full E2E |
 | `scripts/reproduce.sh` | Byte-exact frozen CPR1 reconstruction |
+| `LINEAGE_AND_CITATIONS.md` | Predecessor attribution and claim boundaries |
+| `CITATION.cff` | Machine-readable citation metadata |
 
 ## Deliberate exclusions
 
@@ -148,3 +164,9 @@ The repository does not duplicate public challenge videos or evaluator
 weights, generated camera-frame caches, inflated raw output, or fresh training
 runs. Generated state stays under ignored `work/`. The repository remains
 under 5 MB and does not require Git LFS.
+
+## License
+
+The code is released under the [MIT License](LICENSE). The lineage document
+separately records the upstream projects, papers, and challenge submissions
+that informed this work.

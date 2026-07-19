@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "candidate": "semantic_pose_landslide_selfcompress",
+  "candidate": "semantic-pose-HPAC_CPR1",
   "archive": {
     "bytes": 191052,
     "sha256": "0491d5df84fc70b62b3f7ccf8894f5e1b81c616de46a052e4423fc1e18fdc7cd",
@@ -8,12 +8,12 @@
     "member_bytes": 190952,
     "member_sha256": "fcc6a3c242106350077d3c328a2c07c8994c86d19b1a361f8507917de6ba3d84",
     "zip_compression": "stored",
-    "artifact_tag": "semantic-pose-landslide-selfcompress-cpr1",
+    "artifact_tag": "semantic-pose-HPAC_CPR1",
     "artifact_transport": "github_release_asset",
     "artifact_on_pr_branch": false,
-    "artifact_url": "https://github.com/fesalfayed/comma_video_compression_challenge/releases/download/semantic-pose-landslide-selfcompress-cpr1/archive.zip",
-    "artifact_target_commit": "32f771db5494ea8ef066b1fbac38ff05ae32c6cc",
-    "publication_workflow_run": "https://github.com/fesalfayed/comma_video_compression_challenge/actions/runs/29627305640",
+    "artifact_url": "https://github.com/fesalfayed/comma_video_compression_challenge/releases/download/semantic-pose-HPAC_CPR1/archive.zip",
+    "artifact_target_ref": "semantic-pose-HPAC_CPR1",
+    "publication_method": "github_release_asset",
     "public_download_verified": true,
     "public_download_verified_bytes": 191052,
     "public_download_verified_sha256": "0491d5df84fc70b62b3f7ccf8894f5e1b81c616de46a052e4423fc1e18fdc7cd"
@@ -251,7 +251,7 @@
     "github_linux_nvidia_t4": "pending"
   },
   "submission": {
-    "name": "semantic_pose_landslide_selfcompress",
+    "name": "semantic-pose-HPAC_CPR1",
     "name_available_at_challenge_commit": true,
     "requires_gpu": true,
     "official_runner": "linux-nvidia-t4",
