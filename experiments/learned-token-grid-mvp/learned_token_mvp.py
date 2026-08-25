@@ -31,6 +31,13 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
 
+from hpac_token_search import (
+    HPACRateOracle,
+    accept_with_backtracking,
+    projected_hpac_rate_score,
+    rank_token_moves,
+)
+
 
 N_TOTAL_PAIRS = 600
 N_TOKENS = 5
@@ -62,6 +69,24 @@ def parse_args() -> argparse.Namespace:
         help="Discrete trust region: only these most promising pixels update.",
     )
     parser.add_argument(
+        "--proposal-min-distance",
+        type=int,
+        default=0,
+        help="Minimum Chebyshev distance between moves proposed together.",
+    )
+    parser.add_argument(
+        "--backtrack-max-evals",
+        type=int,
+        default=1,
+        help="Exact batch/split evaluations allowed per optimization step.",
+    )
+    parser.add_argument(
+        "--proposal-mode",
+        choices=("joint", "alternating"),
+        default="joint",
+        help="Alternate joint and rate-only proposals when requested.",
+    )
+    parser.add_argument(
         "--accept-exact",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -70,6 +95,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seg-weight", type=float, default=100.0)
     parser.add_argument("--pose-weight", type=float, default=1.0)
     parser.add_argument("--rate-lambda", type=float, default=0.01)
+    parser.add_argument(
+        "--rate-model",
+        choices=("lzma", "hpac"),
+        default="lzma",
+        help="Use the legacy spatial/LZMA proxy or deployed #130 HPAC surprise.",
+    )
+    parser.add_argument(
+        "--hpac-checkpoint",
+        type=Path,
+        help="Defaults to the frozen #130 self-compressing IntegerHPAC.",
+    )
     parser.add_argument("--finetune-renderer", action="store_true")
     parser.add_argument("--renderer-lr", type=float, default=2e-6)
     parser.add_argument("--seed", type=int, default=20260825)
@@ -528,8 +564,16 @@ def main() -> None:
         raise ValueError("selected pair interval lies outside [0, 600)")
     if args.init_margin <= 0 or args.temperature_start <= 0 or args.temperature_end <= 0:
         raise ValueError("margin and temperatures must be positive")
+    if args.max_token_pixels_per_frame < 1:
+        raise ValueError("--max-token-pixels-per-frame must be positive")
+    if args.proposal_min_distance < 0:
+        raise ValueError("--proposal-min-distance cannot be negative")
+    if args.backtrack_max_evals < 1:
+        raise ValueError("--backtrack-max-evals must be positive")
     if args.accept_exact and args.batch_size != 1:
         raise ValueError("exact atomic acceptance currently requires --batch-size 1")
+    if args.rate_model == "hpac" and not args.accept_exact:
+        raise ValueError("the HPAC rate oracle requires --accept-exact")
     if args.finetune_renderer:
         raise ValueError(
             "renderer fine-tuning belongs in the later joint-training experiment; "
@@ -554,8 +598,9 @@ def main() -> None:
     targets = load_xz_torch(cache_path) if cache_path.suffix == ".xz" else torch.load(
         cache_path, map_location="cpu", weights_only=False
     )
+    all_baseline_tokens = targets["seg"].to(torch.uint8)
     pair_ids = list(range(args.start_pair, args.start_pair + args.pairs))
-    baseline_tokens = targets["seg"][pair_ids].long()
+    baseline_tokens = all_baseline_tokens[pair_ids].long()
     seg_targets = baseline_tokens.clone()
     pose_targets = targets["pose"][pair_ids].float()
 
@@ -574,6 +619,28 @@ def main() -> None:
     for network in (segnet, posenet):
         for parameter in network.parameters():
             parameter.requires_grad_(False)
+
+    hpac_oracle = None
+    if args.rate_model == "hpac":
+        hpac_checkpoint = args.hpac_checkpoint or (
+            recipe_root
+            / "artifacts/checkpoints/hpac_selfcompress_l1_fastbits_e60.pt"
+        )
+        hpac_oracle = HPACRateOracle(
+            hpac_checkpoint,
+            recipe_root / "code",
+            all_baseline_tokens,
+            args.start_pair,
+            device,
+        )
+        print(json.dumps({
+            "stage": "hpac_oracle",
+            "checkpoint": str(hpac_checkpoint),
+            "proposal_mode": args.proposal_mode,
+            "proposal_pixels_per_frame": args.max_token_pixels_per_frame,
+            "proposal_min_distance": args.proposal_min_distance,
+            "backtrack_max_evals": args.backtrack_max_evals,
+        }), flush=True)
 
     slaves = render_frozen_slaves(
         basis, coeff, pair_ids, device, batch_size=args.eval_batch_size
@@ -600,12 +667,17 @@ def main() -> None:
     order = torch.randperm(args.pairs, generator=generator).tolist()
     cursor = 0
     history: list[dict[str, object]] = []
-    best_key = baseline_metrics[
-        "semantic_pose_score_without_rate"
-    ] + projected_lzma_rate_score(baseline_rate["lzma9_bytes"], args.pairs)
+    best_key = (
+        0.0
+        if args.rate_model == "hpac"
+        else baseline_metrics["semantic_pose_score_without_rate"]
+        + projected_lzma_rate_score(baseline_rate["lzma9_bytes"], args.pairs)
+    )
     current_tokens = baseline_tokens.clone()
     best_tokens = baseline_tokens.clone()
     best_state = copy.deepcopy(model.state_dict())
+    current_hpac_delta_bits = 0.0
+    best_hpac_delta_bits = 0.0
     attempted_masks = [
         torch.zeros((EVAL_H, EVAL_W), dtype=torch.bool)
         for _ in range(args.pairs)
@@ -613,6 +685,9 @@ def main() -> None:
     exact_frame_keys: list[float | None] = [None] * args.pairs
     accepted_proposals = 0
     rejected_proposals = 0
+    proposed_moves = 0
+    backtrack_evaluations = 0
+    rejected_proposal_batches = 0
     started = time.time()
 
     for step in range(1, args.steps + 1):
@@ -642,53 +717,34 @@ def main() -> None:
         pose_pred = pose_output(posenet, torch.stack([slave, master_camera], dim=1))
         target_pose = pose_targets[selected].to(device)
         pose_mse = (pose_pred - target_pose).square().mean()
-        rate_proxy = differentiable_rate_proxy(assignments)
+        rate_proxy = (
+            differentiable_rate_proxy(assignments)
+            if args.rate_model == "lzma"
+            else torch.zeros((), device=device)
+        )
         loss = (
             args.seg_weight * seg_proxy
             + args.pose_weight * torch.sqrt(10.0 * pose_mse + 1e-12)
-            + args.rate_lambda * rate_proxy
+            + (
+                args.rate_lambda * rate_proxy
+                if args.rate_model == "lzma"
+                else 0.0
+            )
         )
-
-        if args.accept_exact:
-            selected_index = selected[0]
-            key_before = exact_frame_keys[selected_index]
-            if key_before is None:
-                exact_before = evaluate_exact(
-                    model,
-                    tokens_before,
-                    [pair_ids[selected_index]],
-                    slaves[selected],
-                    seg_targets[selected],
-                    pose_targets[selected],
-                    segnet,
-                    posenet,
-                    pose_output,
-                    args.eval_batch_size,
-                    device,
-                )
-                rate_before = token_rate_statistics(tokens_before)
-                key_before = exact_before[
-                    "semantic_pose_score_without_rate"
-                ] + projected_lzma_rate_score(
-                    rate_before["lzma9_bytes"], len(selected)
-                )
-                exact_frame_keys[selected_index] = key_before
-
         loss.backward()
-        candidate_tokens, gradient_stats = propose_token_changes(
-            logits,
-            tokens_before,
-            selected,
-            args.max_token_pixels_per_frame,
-            attempted_masks,
-        )
-
+        loss_value = float(loss.detach())
+        seg_proxy_value = float(seg_proxy.detach())
+        pose_mse_value = float(pose_mse.detach())
+        rate_proxy_value = float(rate_proxy.detach())
         proposal_accepted = False
         candidate_key = None
-        if args.accept_exact and gradient_stats["gradient_selected_pixels"]:
-            exact_candidate = evaluate_exact(
+        step_backtrack_evaluations = 0
+        step_rejected_batches = 0
+
+        if args.rate_model == "hpac":
+            exact_before = evaluate_exact(
                 model,
-                candidate_tokens,
+                tokens_before,
                 [pair_ids[index] for index in selected],
                 slaves[selected],
                 seg_targets[selected],
@@ -699,23 +755,165 @@ def main() -> None:
                 args.eval_batch_size,
                 device,
             )
-            rate_candidate = token_rate_statistics(candidate_tokens)
-            candidate_key = exact_candidate[
-                "semantic_pose_score_without_rate"
-            ] + projected_lzma_rate_score(
-                rate_candidate["lzma9_bytes"], len(selected)
+            rate_before_bits, rate_tables = hpac_oracle.affected_bits(
+                current_tokens,
+                selected,
+                return_cost_tables=True,
             )
-            proposal_accepted = candidate_key < key_before
+            category_rate_bits = torch.stack(
+                [rate_tables[index] for index in selected]
+            )
+            current_for_rate = tokens_before.long().unsqueeze(-1)
+            rate_proxy_value = float(
+                category_rate_bits.gather(-1, current_for_rate).mean()
+            )
+            rate_only = (
+                args.proposal_mode == "alternating" and step % 2 == 0
+            )
+            moves, gradient_stats = rank_token_moves(
+                logits,
+                tokens_before,
+                selected,
+                args.max_token_pixels_per_frame,
+                attempted_masks,
+                category_rate_bits=category_rate_bits,
+                rate_score_per_bit=projected_hpac_rate_score(1.0, len(selected)),
+                minimum_distance=args.proposal_min_distance,
+                rate_only=rate_only,
+            )
+            proposed_moves += len(moves)
+            key_before = exact_before[
+                "semantic_pose_score_without_rate"
+            ] + projected_hpac_rate_score(
+                rate_before_bits, len(selected)
+            )
+            initial_payload = {
+                "exact": exact_before,
+                "rate_bits": rate_before_bits,
+            }
+
+            def evaluate_candidate(candidate_tokens):
+                exact_candidate = evaluate_exact(
+                    model,
+                    candidate_tokens,
+                    [pair_ids[index] for index in selected],
+                    slaves[selected],
+                    seg_targets[selected],
+                    pose_targets[selected],
+                    segnet,
+                    posenet,
+                    pose_output,
+                    args.eval_batch_size,
+                    device,
+                )
+                overrides = {
+                    selected[batch_index]: candidate_tokens[batch_index]
+                    for batch_index in range(len(selected))
+                }
+                rate_candidate_bits, _ = hpac_oracle.affected_bits(
+                    current_tokens,
+                    selected,
+                    overrides=overrides,
+                )
+                key = exact_candidate[
+                    "semantic_pose_score_without_rate"
+                ] + projected_hpac_rate_score(
+                    rate_candidate_bits, len(selected)
+                )
+                return key, {
+                    "exact": exact_candidate,
+                    "rate_bits": rate_candidate_bits,
+                }
+
+            result = accept_with_backtracking(
+                tokens_before,
+                moves,
+                key_before,
+                initial_payload,
+                evaluate_candidate,
+                args.backtrack_max_evals,
+            )
+            accepted_count = len(result.accepted_moves)
+            rejected_count = len(moves) - accepted_count
+            accepted_proposals += accepted_count
+            rejected_proposals += rejected_count
+            backtrack_evaluations += result.evaluations
+            rejected_proposal_batches += result.rejected_batches
+            step_backtrack_evaluations = result.evaluations
+            step_rejected_batches = result.rejected_batches
+            candidate_key = result.key
+            proposal_accepted = bool(accepted_count)
             if proposal_accepted:
-                accepted_proposals += 1
+                current_tokens[selected] = result.tokens
+                current_hpac_delta_bits += (
+                    float(result.payload["rate_bits"]) - rate_before_bits
+                )
+        else:
+            if args.accept_exact:
+                selected_index = selected[0]
+                key_before = exact_frame_keys[selected_index]
+                if key_before is None:
+                    exact_before = evaluate_exact(
+                        model,
+                        tokens_before,
+                        [pair_ids[selected_index]],
+                        slaves[selected],
+                        seg_targets[selected],
+                        pose_targets[selected],
+                        segnet,
+                        posenet,
+                        pose_output,
+                        args.eval_batch_size,
+                        device,
+                    )
+                    rate_before = token_rate_statistics(tokens_before)
+                    key_before = exact_before[
+                        "semantic_pose_score_without_rate"
+                    ] + projected_lzma_rate_score(
+                        rate_before["lzma9_bytes"], len(selected)
+                    )
+                    exact_frame_keys[selected_index] = key_before
+
+            candidate_tokens, gradient_stats = propose_token_changes(
+                logits,
+                tokens_before,
+                selected,
+                args.max_token_pixels_per_frame,
+                attempted_masks,
+            )
+            move_count = int(gradient_stats["gradient_selected_pixels"])
+            proposed_moves += move_count
+            if args.accept_exact and move_count:
+                exact_candidate = evaluate_exact(
+                    model,
+                    candidate_tokens,
+                    [pair_ids[index] for index in selected],
+                    slaves[selected],
+                    seg_targets[selected],
+                    pose_targets[selected],
+                    segnet,
+                    posenet,
+                    pose_output,
+                    args.eval_batch_size,
+                    device,
+                )
+                rate_candidate = token_rate_statistics(candidate_tokens)
+                candidate_key = exact_candidate[
+                    "semantic_pose_score_without_rate"
+                ] + projected_lzma_rate_score(
+                    rate_candidate["lzma9_bytes"], len(selected)
+                )
+                proposal_accepted = candidate_key < key_before
+                if proposal_accepted:
+                    accepted_proposals += move_count
+                    current_tokens[selected] = candidate_tokens
+                    exact_frame_keys[selected[0]] = candidate_key
+                else:
+                    rejected_proposals += move_count
+            elif move_count:
                 current_tokens[selected] = candidate_tokens
-                exact_frame_keys[selected[0]] = candidate_key
-            else:
-                rejected_proposals += 1
-        elif gradient_stats["gradient_selected_pixels"]:
-            current_tokens[selected] = candidate_tokens
-            proposal_accepted = True
-            accepted_proposals += 1
+                proposal_accepted = True
+                accepted_proposals += move_count
 
         if step % args.eval_every == 0 or step == args.steps:
             learned_tokens = current_tokens.clone()
@@ -734,26 +932,52 @@ def main() -> None:
             )
             rate = token_rate_statistics(learned_tokens)
             changes = int((learned_tokens != baseline_tokens).sum())
-            selection_key = exact[
-                "semantic_pose_score_without_rate"
-            ] + projected_lzma_rate_score(rate["lzma9_bytes"], args.pairs)
+            if args.rate_model == "hpac":
+                selection_key = (
+                    exact["semantic_pose_score_without_rate"]
+                    - baseline_metrics["semantic_pose_score_without_rate"]
+                    + projected_hpac_rate_score(
+                        current_hpac_delta_bits, args.pairs
+                    )
+                )
+            else:
+                selection_key = exact[
+                    "semantic_pose_score_without_rate"
+                ] + projected_lzma_rate_score(
+                    rate["lzma9_bytes"], args.pairs
+                )
             if selection_key < best_key:
                 best_key = selection_key
                 best_tokens = learned_tokens.clone()
                 best_state = copy.deepcopy(model.state_dict())
+                best_hpac_delta_bits = current_hpac_delta_bits
             record = {
                 "step": step,
                 "elapsed_seconds": time.time() - started,
                 "temperature": temperature,
-                "loss": float(loss.detach()),
-                "seg_proxy": float(seg_proxy.detach()),
-                "pose_mse_batch": float(pose_mse.detach()),
-                "rate_proxy_batch": float(rate_proxy.detach()),
+                "loss": loss_value,
+                "seg_proxy": seg_proxy_value,
+                "pose_mse_batch": pose_mse_value,
+                "rate_proxy_batch": rate_proxy_value,
                 **gradient_stats,
                 "proposal_accepted": proposal_accepted,
                 "candidate_exact_rate_key": candidate_key,
                 "accepted_proposals": accepted_proposals,
                 "rejected_proposals": rejected_proposals,
+                "proposed_moves": proposed_moves,
+                "backtrack_evaluations": backtrack_evaluations,
+                "rejected_proposal_batches": rejected_proposal_batches,
+                "step_backtrack_evaluations": step_backtrack_evaluations,
+                "step_rejected_proposal_batches": step_rejected_batches,
+                "hpac_ideal_delta_bits": current_hpac_delta_bits,
+                "hpac_rate_score_delta": projected_hpac_rate_score(
+                    current_hpac_delta_bits, args.pairs
+                ),
+                "selection_key_delta": (
+                    selection_key
+                    if args.rate_model == "hpac"
+                    else None
+                ),
                 "changed_tokens": changes,
                 "changed_fraction": changes / baseline_tokens.numel(),
                 **exact,
@@ -804,9 +1028,21 @@ def main() -> None:
     proxy_rate_score_delta = (
         25.0 * projected_token_delta / ORIGINAL_UNCOMPRESSED_BYTES
     )
+    hpac_rate_score_delta = projected_hpac_rate_score(
+        best_hpac_delta_bits, args.pairs
+    )
+    active_rate_score_delta = (
+        hpac_rate_score_delta
+        if args.rate_model == "hpac"
+        else proxy_rate_score_delta
+    )
     report = {
-        "schema_version": 1,
-        "experiment": "free-discrete-token-grid-mvp",
+        "schema_version": 2,
+        "experiment": (
+            "free-discrete-token-grid-v2-hpac"
+            if args.rate_model == "hpac"
+            else "free-discrete-token-grid-mvp"
+        ),
         "config": {
             key: str(value) if isinstance(value, Path) else value
             for key, value in vars(args).items()
@@ -823,14 +1059,20 @@ def main() -> None:
         "changed_fraction": changed_tokens / baseline_tokens.numel(),
         "accepted_proposals": accepted_proposals,
         "rejected_proposals": rejected_proposals,
+        "proposed_moves": proposed_moves,
+        "backtrack_evaluations": backtrack_evaluations,
+        "rejected_proposal_batches": rejected_proposal_batches,
         "renderer_semantic_payload_bytes": len(semantic_blob),
         "renderer_semantic_lzma9_bytes": len(lzma.compress(semantic_blob, preset=9)),
         "projected_600_token_lzma_delta_bytes": projected_token_delta,
         "proxy_rate_score_delta": proxy_rate_score_delta,
+        "hpac_ideal_delta_bits": best_hpac_delta_bits,
+        "hpac_rate_score_delta": hpac_rate_score_delta,
+        "active_rate_model": args.rate_model,
         "proxy_total_score_delta_after_int4": (
             learned_metrics_quantized["semantic_pose_score_without_rate"]
             - baseline_metrics["semantic_pose_score_without_rate"]
-            + proxy_rate_score_delta
+            + active_rate_score_delta
         ),
         "history": history,
         "elapsed_seconds": time.time() - started,

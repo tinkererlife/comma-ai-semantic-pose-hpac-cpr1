@@ -3,6 +3,13 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from hpac_token_search import (
+    TokenMove,
+    accept_with_backtracking,
+    projected_hpac_rate_score,
+    quantized_probability_bits,
+    rank_token_moves,
+)
 from materialize_learned_cache import replace_tokens
 from replace_archive_tokens import replace_token_stream
 from learned_token_mvp import (
@@ -106,6 +113,71 @@ def test_projected_rate_score_is_exact_for_full_window() -> None:
     assert projected_lzma_rate_score(191_052, 600) == expected
 
 
+def test_hpac_probability_bits_match_uniform_softmax() -> None:
+    bits = quantized_probability_bits(torch.zeros((3, 5)))
+    assert torch.allclose(bits, torch.full_like(bits, np.log2(5)), atol=1e-6)
+
+
+def test_projected_hpac_bits_use_official_rate_coefficient() -> None:
+    assert projected_hpac_rate_score(8 * 191_052, 600) == (
+        25.0 * 191_052 / 37_545_489
+    )
+
+
+def test_rate_only_moves_are_spatially_separated() -> None:
+    tokens = torch.zeros((1, 4, 4), dtype=torch.long)
+    logits = local_logits_from_tokens(tokens, 0.25, torch.device("cpu"))
+    logits.grad = torch.zeros_like(logits)
+    costs = torch.full_like(logits, 10.0)
+    costs[..., 0] = 5.0
+    costs[..., 1] = 4.0
+    costs[0, 0, 0, 1] = 0.0
+    costs[0, 0, 1, 1] = 0.1
+    costs[0, 3, 3, 1] = 0.2
+    attempted = [torch.zeros((4, 4), dtype=torch.bool)]
+    moves, stats = rank_token_moves(
+        logits,
+        tokens,
+        [0],
+        max_pixels_per_frame=2,
+        attempted_masks=attempted,
+        category_rate_bits=costs,
+        rate_score_per_bit=1.0,
+        minimum_distance=3,
+        rate_only=True,
+    )
+    assert [(move.row, move.col, move.after) for move in moves] == [
+        (0, 0, 1),
+        (3, 3, 1),
+    ]
+    assert stats["proposal_mode"] == "rate"
+
+
+def test_backtracking_finds_useful_subset_of_rejected_batch() -> None:
+    tokens = torch.zeros((1, 1, 4), dtype=torch.long)
+    moves = [
+        TokenMove(0, 0, 0, col, 0, 1, 1.0, 1.0, 0.0)
+        for col in range(4)
+    ]
+
+    def objective(candidate: torch.Tensor):
+        key = abs(int(candidate.sum()) - 1)
+        return float(key), {"sum": int(candidate.sum())}
+
+    result = accept_with_backtracking(
+        tokens,
+        moves,
+        initial_key=1.0,
+        initial_payload={"sum": 0},
+        evaluate=objective,
+        max_evaluations=10,
+    )
+    assert len(result.accepted_moves) == 1
+    assert int(result.tokens.sum()) == 1
+    assert result.key == 0.0
+    assert result.rejected_batches >= 1
+
+
 def test_replace_tokens_preserves_pose_and_counts_changes() -> None:
     cache = {
         "seg": torch.zeros((2, 2, 2), dtype=torch.uint8),
@@ -115,6 +187,20 @@ def test_replace_tokens_preserves_pose_and_counts_changes() -> None:
     assert changed == 2
     assert output["seg"].tolist() == [[[0, 1], [0, 0]], [[2, 0], [0, 0]]]
     assert output["pose"] is cache["pose"]
+
+
+def test_replace_tokens_can_overlay_a_partial_frame_window() -> None:
+    cache = {
+        "seg": torch.zeros((3, 2, 2), dtype=torch.uint8),
+        "pose": torch.zeros((3, 6)),
+    }
+    output, changed = replace_tokens(cache, bytes([1, 0, 0, 2]), start_pair=1)
+    assert changed == 2
+    assert output["seg"].tolist() == [
+        [[0, 0], [0, 0]],
+        [[1, 0], [0, 2]],
+        [[0, 0], [0, 0]],
+    ]
 
 
 def test_replace_token_stream_preserves_model_prefix(tmp_path) -> None:

@@ -24,21 +24,30 @@ def load_cache(path: Path) -> dict[str, torch.Tensor]:
 
 
 def replace_tokens(
-    cache: dict[str, torch.Tensor], token_bytes: bytes
+    cache: dict[str, torch.Tensor], token_bytes: bytes, start_pair: int = 0
 ) -> tuple[dict[str, torch.Tensor], int]:
     baseline = cache["seg"].to(torch.uint8)
-    if len(token_bytes) != baseline.numel():
+    if start_pair < 0:
+        raise ValueError("start_pair cannot be negative")
+    frame_tokens = baseline[0].numel()
+    if not token_bytes or len(token_bytes) % frame_tokens:
         raise ValueError(
-            f"token byte count {len(token_bytes)} != expected {baseline.numel()}"
+            f"token byte count {len(token_bytes)} is not a whole number of frames"
         )
+    frame_count = len(token_bytes) // frame_tokens
+    if start_pair + frame_count > len(baseline):
+        raise ValueError("learned token window lies outside the base cache")
     learned = torch.from_numpy(
         np.frombuffer(token_bytes, dtype=np.uint8).copy()
-    ).reshape_as(baseline)
+    ).reshape(frame_count, *baseline.shape[1:])
     if int(learned.max()) >= 5:
         raise ValueError("learned token IDs must be in [0, 5)")
-    changed = int((learned != baseline).sum())
+    changed = int(
+        (learned != baseline[start_pair : start_pair + frame_count]).sum()
+    )
     output = dict(cache)
-    output["seg"] = learned
+    output["seg"] = baseline.clone()
+    output["seg"][start_pair : start_pair + frame_count] = learned
     return output, changed
 
 
@@ -46,11 +55,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-cache", type=Path, required=True)
     parser.add_argument("--learned-tokens", type=Path, required=True)
+    parser.add_argument("--start-pair", type=int, default=0)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
     token_bytes = args.learned_tokens.read_bytes()
-    output, changed = replace_tokens(load_cache(args.base_cache), token_bytes)
+    output, changed = replace_tokens(
+        load_cache(args.base_cache), token_bytes, args.start_pair
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(output, args.out)
     report = {
