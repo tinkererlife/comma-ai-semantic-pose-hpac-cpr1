@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from materialize_learned_cache import replace_tokens
+from replace_archive_tokens import replace_token_stream
 from learned_token_mvp import (
     differentiable_rate_proxy,
     hard_conditional_entropy,
@@ -114,3 +115,20 @@ def test_replace_tokens_preserves_pose_and_counts_changes() -> None:
     assert changed == 2
     assert output["seg"].tolist() == [[[0, 1], [0, 0]], [[2, 0], [0, 0]]]
     assert output["pose"] is cache["pose"]
+
+
+def test_replace_token_stream_preserves_model_prefix(tmp_path) -> None:
+    import struct
+    import zipfile
+
+    base = tmp_path / "base.zip"
+    payload = struct.pack("<I", 3) + b"abc" + b"old!"
+    with zipfile.ZipFile(base, "w") as archive:
+        archive.writestr("p", payload)
+    output = tmp_path / "learned.zip"
+    report = replace_token_stream(base, b"new!data", output)
+    with zipfile.ZipFile(output) as archive:
+        rebuilt = archive.read("p")
+    assert rebuilt[:7] == payload[:7]
+    assert rebuilt[7:] == b"new!data"
+    assert report["model_prefix_bytes"] == 7
