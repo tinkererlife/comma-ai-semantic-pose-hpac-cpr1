@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from materialize_learned_cache import replace_tokens
 from learned_token_mvp import (
     differentiable_rate_proxy,
     hard_conditional_entropy,
@@ -102,3 +103,14 @@ def test_streaming_proposal_changes_best_pixel_to_best_category() -> None:
 def test_projected_rate_score_is_exact_for_full_window() -> None:
     expected = 25.0 * 191_052 / 37_545_489
     assert projected_lzma_rate_score(191_052, 600) == expected
+
+
+def test_replace_tokens_preserves_pose_and_counts_changes() -> None:
+    cache = {
+        "seg": torch.zeros((2, 2, 2), dtype=torch.uint8),
+        "pose": torch.arange(12, dtype=torch.float32).reshape(2, 6),
+    }
+    output, changed = replace_tokens(cache, bytes([0, 1, 0, 0, 2, 0, 0, 0]))
+    assert changed == 2
+    assert output["seg"].tolist() == [[[0, 1], [0, 0]], [[2, 0], [0, 0]]]
+    assert output["pose"] is cache["pose"]
