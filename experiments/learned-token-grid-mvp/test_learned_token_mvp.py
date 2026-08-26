@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import lzma
 import numpy as np
 import torch
 
@@ -218,3 +219,30 @@ def test_replace_token_stream_preserves_model_prefix(tmp_path) -> None:
     assert rebuilt[:7] == payload[:7]
     assert rebuilt[7:] == b"new!data"
     assert report["model_prefix_bytes"] == 7
+
+
+def test_replace_semantic_preserves_carrier_and_hpac(tmp_path) -> None:
+    import struct
+    import zipfile
+
+    base = tmp_path / "base.zip"
+    old_semantic = b"old"
+    carrier_and_hpac = b"carryhpac"
+    models = struct.pack("<II", len(old_semantic), 5) + old_semantic + carrier_and_hpac
+    compressed = lzma.compress(models)
+    payload = struct.pack("<I", len(compressed)) + compressed + b"old!"
+    with zipfile.ZipFile(base, "w") as archive:
+        archive.writestr("p", payload)
+
+    output = tmp_path / "learned.zip"
+    report = replace_token_stream(base, b"new!", output, b"semantic")
+    with zipfile.ZipFile(output) as archive:
+        rebuilt = archive.read("p")
+    model_size = struct.unpack_from("<I", rebuilt)[0]
+    raw = lzma.decompress(rebuilt[4 : 4 + model_size])
+    semantic_size, carrier_size = struct.unpack_from("<II", raw)
+    assert semantic_size == len(b"semantic")
+    assert carrier_size == 5
+    assert raw[8 + semantic_size :] == carrier_and_hpac
+    assert rebuilt[4 + model_size :] == b"new!"
+    assert report["preserved_model_bytes"] == len(carrier_and_hpac)

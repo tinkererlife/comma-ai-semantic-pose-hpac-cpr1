@@ -1,0 +1,16 @@
+{
+  "baseline_pr": 130,
+  "baseline_score": 0.17214129749189644,
+  "token_grid_score": 0.17068724057460966,
+  "final_score": 0.17025396241719662,
+  "improvement_vs_baseline_percent": 1.096387155318535,
+  "projected_rank_on_2026-08-26": 3,
+  "average_pose_loss": 0.00001723,
+  "average_seg_loss": 0.00029613,
+  "archive_bytes": 191504,
+  "archive_sha256": "3dfbae38e0c39e2d73f9ed6212a1b669a08bf42add1631ca45de74ac598fba2f",
+  "changed_tokens": 159,
+  "renderer_learning_rate": 2e-7,
+  "selected_epoch": 1,
+  "note": "Epochs 2-4 regressed and were rejected."
+}

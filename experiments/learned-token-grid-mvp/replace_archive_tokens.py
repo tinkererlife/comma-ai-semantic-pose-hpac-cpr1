@@ -1,17 +1,36 @@
 #!/usr/bin/env python3
-"""Build a CPR1 variant by replacing only its arithmetic token stream."""
+"""Build a CPR1 variant while preserving every unchanged payload byte."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import lzma
 import struct
 import zipfile
 from pathlib import Path
 
 
-def replace_token_stream(base_archive: Path, tokens: bytes, output: Path) -> dict:
+LZMA_FILTERS = [{
+    "id": lzma.FILTER_LZMA2,
+    "dict_size": 1 << 16,
+    "lc": 0,
+    "lp": 1,
+    "pb": 0,
+    "mode": lzma.MODE_NORMAL,
+    "nice_len": 273,
+    "mf": lzma.MF_BT4,
+    "depth": 0,
+}]
+
+
+def replace_token_stream(
+    base_archive: Path,
+    tokens: bytes,
+    output: Path,
+    semantic_blob: bytes | None = None,
+) -> dict:
     with zipfile.ZipFile(base_archive) as archive:
         infos = archive.infolist()
         if len(infos) != 1 or infos[0].filename != "p":
@@ -26,7 +45,29 @@ def replace_token_stream(base_archive: Path, tokens: bytes, output: Path) -> dic
     if not tokens or len(tokens) % 4:
         raise ValueError("range-coded token stream must contain uint32 words")
 
-    rebuilt = payload[:token_offset] + tokens
+    model_prefix = payload[:token_offset]
+    preserved_model_bytes = None
+    if semantic_blob is not None:
+        models_raw = lzma.decompress(payload[4:token_offset])
+        if len(models_raw) < 8:
+            raise ValueError("truncated CPR1 model payload")
+        semantic_bytes, carrier_bytes = struct.unpack_from("<II", models_raw)
+        preserved_offset = 8 + semantic_bytes
+        if preserved_offset + carrier_bytes > len(models_raw):
+            raise ValueError("semantic or carrier length exceeds model payload")
+        preserved = models_raw[preserved_offset:]
+        rebuilt_models_raw = (
+            struct.pack("<II", len(semantic_blob), carrier_bytes)
+            + semantic_blob
+            + preserved
+        )
+        rebuilt_models = lzma.compress(
+            rebuilt_models_raw, format=lzma.FORMAT_XZ, filters=LZMA_FILTERS
+        )
+        model_prefix = struct.pack("<I", len(rebuilt_models)) + rebuilt_models
+        preserved_model_bytes = len(preserved)
+
+    rebuilt = model_prefix + tokens
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", allowZip64=False) as archive:
         info = zipfile.ZipInfo("p", date_time=(1980, 1, 1, 0, 0, 0))
@@ -38,8 +79,12 @@ def replace_token_stream(base_archive: Path, tokens: bytes, output: Path) -> dic
         "base_archive_bytes": base_archive.stat().st_size,
         "archive_bytes": output.stat().st_size,
         "model_prefix_bytes": token_offset,
+        "learned_model_prefix_bytes": len(model_prefix),
         "base_token_bytes": len(payload) - token_offset,
         "learned_token_bytes": len(tokens),
+        "semantic_replaced": semantic_blob is not None,
+        "semantic_bytes": len(semantic_blob) if semantic_blob is not None else None,
+        "preserved_model_bytes": preserved_model_bytes,
         "archive_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
     }
 
@@ -48,10 +93,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-archive", type=Path, required=True)
     parser.add_argument("--tokens", type=Path, required=True)
+    parser.add_argument("--semantic-blob", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
-    result = replace_token_stream(args.base_archive, args.tokens.read_bytes(), args.out)
+    result = replace_token_stream(
+        args.base_archive,
+        args.tokens.read_bytes(),
+        args.out,
+        args.semantic_blob.read_bytes() if args.semantic_blob else None,
+    )
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

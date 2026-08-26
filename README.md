@@ -2,8 +2,8 @@
 
 This is the public reproducibility repository for
 [`semantic-pose-HPAC_CPR1`](https://github.com/commaai/comma_video_compression_challenge/pull/130).
-This fork adds freely optimized five-symbol token grids; V2 prices moves with deployed #130 HPAC surprise and tests spatial batches through exact SegNet/PoseNet backtracking.
-V1 scored 0.170687 vs. 0.172141 officially; a same-budget 32-frame V2 probe changed 52 tokens and improved the HPAC-priced proxy by 0.00320 (~10x V1), with +16 actual range-coded bytes.
+This fork learns a hard five-symbol token grid, then separately hardens the int4 renderer on all 600 frames and retains its best exact checkpoint.
+Its 191,504-byte artifact scores 0.170254 vs. #130's 0.172141 (1.096% lower); later renderer epochs regress.
 It preserves two separate guarantees:
 
 1. a byte-exact rebuild of the frozen 191,052-byte CPR1 submission artifact;
