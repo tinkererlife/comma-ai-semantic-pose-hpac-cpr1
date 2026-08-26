@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--challenge-root", type=Path, required=True)
     parser.add_argument("--cache", type=Path)
     parser.add_argument("--archive", type=Path)
+    parser.add_argument(
+        "--initial-tokens",
+        type=Path,
+        help="Optional full-600 uint8 grid to improve instead of starting at #130.",
+    )
     parser.add_argument("--start-pair", type=int, default=0)
     parser.add_argument("--pairs", type=int, default=32)
     parser.add_argument("--steps", type=int, default=320)
@@ -82,9 +87,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--proposal-mode",
-        choices=("joint", "alternating"),
+        choices=("joint", "rate", "alternating"),
         default="joint",
-        help="Alternate joint and rate-only proposals when requested.",
+        help="Rank by total gradient, HPAC rate alone, or alternate both.",
     )
     parser.add_argument(
         "--accept-exact",
@@ -598,10 +603,25 @@ def main() -> None:
     targets = load_xz_torch(cache_path) if cache_path.suffix == ".xz" else torch.load(
         cache_path, map_location="cpu", weights_only=False
     )
-    all_baseline_tokens = targets["seg"].to(torch.uint8)
+    all_target_tokens = targets["seg"].to(torch.uint8)
+    all_initial_tokens = all_target_tokens.clone()
+    if args.initial_tokens:
+        raw_initial = np.frombuffer(
+            args.initial_tokens.read_bytes(), dtype=np.uint8
+        ).copy()
+        if raw_initial.size != all_target_tokens.numel():
+            raise ValueError(
+                f"initial grid has {raw_initial.size} tokens, "
+                f"expected {all_target_tokens.numel()}"
+            )
+        if int(raw_initial.max()) >= N_TOKENS:
+            raise ValueError("initial token IDs must lie in [0, 5)")
+        all_initial_tokens = torch.from_numpy(raw_initial).reshape_as(
+            all_target_tokens
+        )
     pair_ids = list(range(args.start_pair, args.start_pair + args.pairs))
-    baseline_tokens = all_baseline_tokens[pair_ids].long()
-    seg_targets = baseline_tokens.clone()
+    baseline_tokens = all_initial_tokens[pair_ids].long()
+    seg_targets = all_target_tokens[pair_ids].long()
     pose_targets = targets["pose"][pair_ids].float()
 
     model, basis, coeff, frozen_sizes = load_deployed_submission(archive_path, device)
@@ -629,7 +649,7 @@ def main() -> None:
         hpac_oracle = HPACRateOracle(
             hpac_checkpoint,
             recipe_root / "code",
-            all_baseline_tokens,
+            all_initial_tokens,
             args.start_pair,
             device,
         )
@@ -684,6 +704,8 @@ def main() -> None:
     ]
     exact_frame_keys: list[float | None] = [None] * args.pairs
     accepted_proposals = 0
+    accepted_rate_saving_proposals = 0
+    accepted_lossy_rate_proposals = 0
     rejected_proposals = 0
     proposed_moves = 0
     backtrack_evaluations = 0
@@ -740,6 +762,9 @@ def main() -> None:
         candidate_key = None
         step_backtrack_evaluations = 0
         step_rejected_batches = 0
+        step_perception_delta = 0.0
+        step_hpac_delta_bits = 0.0
+        step_total_delta = 0.0
 
         if args.rate_model == "hpac":
             exact_before = evaluate_exact(
@@ -767,7 +792,7 @@ def main() -> None:
             rate_proxy_value = float(
                 category_rate_bits.gather(-1, current_for_rate).mean()
             )
-            rate_only = (
+            rate_only = args.proposal_mode == "rate" or (
                 args.proposal_mode == "alternating" and step % 2 == 0
             )
             moves, gradient_stats = rank_token_moves(
@@ -815,14 +840,25 @@ def main() -> None:
                     selected,
                     overrides=overrides,
                 )
-                key = exact_candidate[
+                unconstrained_key = exact_candidate[
                     "semantic_pose_score_without_rate"
                 ] + projected_hpac_rate_score(
                     rate_candidate_bits, len(selected)
                 )
-                return key, {
+                # A direct low-surprise symbol can still make later HPAC
+                # contexts more expensive.  Pure rate mode requires the whole
+                # affected stream to shrink before considering total score.
+                rate_constraint_satisfied = (
+                    args.proposal_mode != "rate"
+                    or rate_candidate_bits < rate_before_bits
+                )
+                return (
+                    unconstrained_key if rate_constraint_satisfied else math.inf
+                ), {
                     "exact": exact_candidate,
                     "rate_bits": rate_candidate_bits,
+                    "unconstrained_key": unconstrained_key,
+                    "rate_constraint_satisfied": rate_constraint_satisfied,
                 }
 
             result = accept_with_backtracking(
@@ -844,10 +880,20 @@ def main() -> None:
             candidate_key = result.key
             proposal_accepted = bool(accepted_count)
             if proposal_accepted:
-                current_tokens[selected] = result.tokens
-                current_hpac_delta_bits += (
+                step_perception_delta = (
+                    result.payload["exact"]["semantic_pose_score_without_rate"]
+                    - exact_before["semantic_pose_score_without_rate"]
+                )
+                step_hpac_delta_bits = (
                     float(result.payload["rate_bits"]) - rate_before_bits
                 )
+                step_total_delta = result.key - key_before
+                if step_hpac_delta_bits < 0:
+                    accepted_rate_saving_proposals += accepted_count
+                    if step_perception_delta > 0:
+                        accepted_lossy_rate_proposals += accepted_count
+                current_tokens[selected] = result.tokens
+                current_hpac_delta_bits += step_hpac_delta_bits
         else:
             if args.accept_exact:
                 selected_index = selected[0]
@@ -969,6 +1015,11 @@ def main() -> None:
                 "rejected_proposal_batches": rejected_proposal_batches,
                 "step_backtrack_evaluations": step_backtrack_evaluations,
                 "step_rejected_proposal_batches": step_rejected_batches,
+                "step_perception_delta": step_perception_delta,
+                "step_hpac_delta_bits": step_hpac_delta_bits,
+                "step_total_score_delta": step_total_delta,
+                "accepted_rate_saving_proposals": accepted_rate_saving_proposals,
+                "accepted_lossy_rate_proposals": accepted_lossy_rate_proposals,
                 "hpac_ideal_delta_bits": current_hpac_delta_bits,
                 "hpac_rate_score_delta": projected_hpac_rate_score(
                     current_hpac_delta_bits, args.pairs
@@ -1057,7 +1108,15 @@ def main() -> None:
         "learned_requantized_int4_renderer": learned_metrics_quantized,
         "changed_tokens": changed_tokens,
         "changed_fraction": changed_tokens / baseline_tokens.numel(),
+        "initial_token_changes_from_targets": int(
+            (baseline_tokens != seg_targets).sum()
+        ),
+        "final_token_changes_from_targets": int(
+            (best_tokens != seg_targets).sum()
+        ),
         "accepted_proposals": accepted_proposals,
+        "accepted_rate_saving_proposals": accepted_rate_saving_proposals,
+        "accepted_lossy_rate_proposals": accepted_lossy_rate_proposals,
         "rejected_proposals": rejected_proposals,
         "proposed_moves": proposed_moves,
         "backtrack_evaluations": backtrack_evaluations,
