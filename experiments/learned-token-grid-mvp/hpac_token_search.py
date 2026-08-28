@@ -324,6 +324,85 @@ class HPACRateOracle:
             current[0, mask] = target[mask]
         return float(total_bits)
 
+    @torch.no_grad()
+    def patch_bits_pairs(
+        self,
+        global_indices: list[int],
+        targets_raw: torch.Tensor,
+        previous_raw: torch.Tensor,
+        frame_indices: list[int],
+        patch_indices: list[int],
+        group_sets: list[set[int]],
+        context=None,
+    ) -> list[float]:
+        """Evaluate selected (frame, patch) pairs in group-vectorized batches."""
+        if not frame_indices:
+            return []
+        if not (
+            len(frame_indices) == len(patch_indices) == len(group_sets)
+        ):
+            raise ValueError("patch-pair metadata lengths do not match")
+        target = targets_raw.to(device=self.device, dtype=torch.long)
+        previous = previous_raw.to(device=self.device, dtype=torch.long)
+        current = torch.zeros_like(previous)
+        indices = torch.tensor(
+            global_indices, dtype=torch.long, device=self.device
+        )
+        if context is None:
+            context = self.model.prepare_frame_context(indices, previous)
+        frame_tensor = torch.tensor(
+            frame_indices, dtype=torch.long, device=self.device
+        )
+        patch_tensor = torch.tensor(
+            patch_indices, dtype=torch.long, device=self.device
+        )
+        flat_indices = frame_tensor * self.sparse.patch_count + patch_tensor
+        target_patches = target.view(
+            target.shape[0],
+            self.sparse.patch_rows,
+            self.sparse.patch,
+            self.sparse.patch_cols,
+            self.sparse.patch,
+        ).permute(0, 1, 3, 2, 4).reshape(
+            -1, self.sparse.patch, self.sparse.patch
+        ).index_select(0, flat_indices)
+        totals = torch.zeros(
+            len(frame_indices), dtype=torch.float64, device=self.device
+        )
+        for group, mask in enumerate(self.masks):
+            active = [
+                pair_index
+                for pair_index, groups in enumerate(group_sets)
+                if group in groups
+            ]
+            if active:
+                active_tensor = torch.tensor(
+                    active, dtype=torch.long, device=self.device
+                )
+                logits = self.sparse.selected_logits_patches(
+                    current,
+                    context,
+                    group,
+                    patch_tensor.index_select(0, active_tensor),
+                    frame_tensor.index_select(0, active_tensor),
+                )
+                selected_bits = quantized_probability_bits(
+                    logits.reshape(-1, N_TOKENS)
+                ).reshape(len(active), -1, N_TOKENS)
+                positions = self.sparse.plans[group].targets
+                active_targets = target_patches.index_select(
+                    0, active_tensor
+                )
+                symbols = active_targets[
+                    :, positions[:, 0], positions[:, 1]
+                ]
+                contributions = selected_bits.gather(
+                    -1, symbols.unsqueeze(-1)
+                ).squeeze(-1).double().sum(dim=1)
+                totals[active_tensor] += contributions
+            current[:, mask] = target[:, mask]
+        return totals.cpu().tolist()
+
     def _future_positions(
         self,
         positions: set[tuple[int, int]],
@@ -469,6 +548,239 @@ class HPACRateOracle:
                 "next_groups": len(next_groups) if next_patch_count else 0,
             },
         )
+
+    @torch.no_grad()
+    def localized_move_delta_batch(
+        self,
+        window_tokens: torch.Tensor,
+        local_indices: list[int],
+        candidate_raws: torch.Tensor,
+    ) -> list[tuple[float, dict[int, float], dict[str, int]]]:
+        """Vectorize exact localized deltas for independent one-frame moves."""
+        if len(local_indices) != len(candidate_raws):
+            raise ValueError("candidate batch does not match local indices")
+        results: list[
+            tuple[float, dict[int, float], dict[str, int]] | None
+        ] = [None] * len(local_indices)
+        entries: list[dict[str, object]] = []
+        patch = self.model.P
+        patch_cols = self.baseline_tokens.shape[2] // patch
+        zero = torch.zeros_like(self.baseline_tokens[0])
+        for result_index, (local_index, candidate_raw) in enumerate(
+            zip(local_indices, candidate_raws)
+        ):
+            global_index = self.start_pair + local_index
+            before_raw = self._raw_frame(window_tokens, global_index, {})
+            candidate_raw = candidate_raw.to(torch.uint8).cpu()
+            changed = (before_raw != candidate_raw).nonzero(as_tuple=False)
+            if not len(changed):
+                results[result_index] = (
+                    0.0,
+                    {},
+                    {"current_patches": 0, "next_patches": 0},
+                )
+                continue
+            current_patches = (
+                (changed[:, 0] // patch) * patch_cols + changed[:, 1] // patch
+            ).unique(sorted=True).tolist()
+            local_changed = {
+                (int(row) % patch, int(col) % patch)
+                for row, col in changed.tolist()
+            }
+            current_hidden = self._future_positions(
+                local_changed, self.sparse.a_offsets
+            )
+            current_groups = self._output_groups(current_hidden)
+            current_groups |= {
+                col + self.model.delta * row for row, col in local_changed
+            }
+            previous_raw = (
+                zero
+                if global_index == 0
+                else self._raw_frame(window_tokens, global_index - 1, {})
+            )
+            entries.append({
+                "result_index": result_index,
+                "local_index": local_index,
+                "global_index": global_index,
+                "before": before_raw,
+                "candidate": candidate_raw,
+                "previous": previous_raw,
+                "current_patches": current_patches,
+                "current_groups": current_groups,
+            })
+
+        if not entries:
+            return [result for result in results if result is not None]
+
+        batch = len(entries)
+        current_targets = torch.stack(
+            [entry["before"] for entry in entries]
+            + [entry["candidate"] for entry in entries]
+        )
+        current_previous = torch.stack(
+            [entry["previous"] for entry in entries] * 2
+        )
+        current_globals = [int(entry["global_index"]) for entry in entries]
+        current_frame_indices: list[int] = []
+        current_patch_indices: list[int] = []
+        current_group_sets: list[set[int]] = []
+        current_descriptors: list[tuple[int, bool]] = []
+        for entry_index, entry in enumerate(entries):
+            for patch_index in entry["current_patches"]:
+                for after in (False, True):
+                    current_frame_indices.append(
+                        entry_index + (batch if after else 0)
+                    )
+                    current_patch_indices.append(int(patch_index))
+                    current_group_sets.append(set(entry["current_groups"]))
+                    current_descriptors.append((entry_index, after))
+        current_values = self.patch_bits_pairs(
+            current_globals * 2,
+            current_targets,
+            current_previous,
+            current_frame_indices,
+            current_patch_indices,
+            current_group_sets,
+        )
+        current_before = [0.0] * batch
+        current_after = [0.0] * batch
+        for value, (entry_index, after) in zip(
+            current_values, current_descriptors
+        ):
+            (current_after if after else current_before)[entry_index] += value
+
+        next_entries = [
+            (entry_index, entry)
+            for entry_index, entry in enumerate(entries)
+            if int(entry["global_index"]) + 1 < N_TOTAL_PAIRS
+        ]
+        next_before = [0.0] * batch
+        next_after = [0.0] * batch
+        next_patch_counts = [0] * batch
+        next_group_counts = [0] * batch
+        if next_entries:
+            next_batch = len(next_entries)
+            next_globals = [
+                int(entry["global_index"]) + 1 for _, entry in next_entries
+            ]
+            next_targets_base = [
+                self._raw_frame(window_tokens, global_index, {})
+                for global_index in next_globals
+            ]
+            before_previous = [entry["before"] for _, entry in next_entries]
+            after_previous = [entry["candidate"] for _, entry in next_entries]
+            context_previous = torch.stack(
+                before_previous + after_previous
+            ).to(device=self.device, dtype=torch.long)
+            context_indices = torch.tensor(
+                next_globals * 2, dtype=torch.long, device=self.device
+            )
+            before_after_context = self.model.prepare_frame_context(
+                context_indices, context_previous
+            )
+            reshaped_context = []
+            for value in before_after_context:
+                if value is None:
+                    reshaped_context.append(None)
+                    continue
+                expected = 2 * next_batch * self.sparse.patch_count
+                if value.shape[0] != expected:
+                    raise ValueError(
+                        "unexpected batched HPAC context layout: "
+                        f"{value.shape[0]} != {expected}"
+                    )
+                reshaped_context.append(value.reshape(
+                    2 * next_batch,
+                    self.sparse.patch_count,
+                    *value.shape[1:],
+                ))
+
+            next_frame_indices: list[int] = []
+            next_patch_indices: list[int] = []
+            next_group_sets: list[set[int]] = []
+            next_descriptors: list[tuple[int, bool]] = []
+            for next_index, (entry_index, _) in enumerate(next_entries):
+                affected = torch.zeros(
+                    self.sparse.patch_count,
+                    dtype=torch.bool,
+                    device=self.device,
+                )
+                for value in reshaped_context:
+                    if value is None:
+                        continue
+                    affected |= (
+                        value[next_index] != value[next_index + next_batch]
+                    ).reshape(self.sparse.patch_count, -1).any(dim=1)
+                next_patches = affected.nonzero(as_tuple=False).flatten()
+                context_positions: set[tuple[int, int]] = set()
+                for value in reshaped_context:
+                    if value is None or value.shape[-2:] == (1, 1):
+                        continue
+                    changed_context = (
+                        value[next_index] != value[next_index + next_batch]
+                    ).any(dim=1)
+                    for patch_map in changed_context.index_select(
+                        0, next_patches
+                    ):
+                        context_positions.update(map(
+                            tuple,
+                            patch_map.nonzero(as_tuple=False).tolist(),
+                        ))
+                next_groups = self._output_groups(context_positions)
+                next_patch_counts[entry_index] = len(next_patches)
+                next_group_counts[entry_index] = len(next_groups)
+                for patch_index in next_patches.tolist():
+                    for after in (False, True):
+                        next_frame_indices.append(
+                            next_index + (next_batch if after else 0)
+                        )
+                        next_patch_indices.append(int(patch_index))
+                        next_group_sets.append(next_groups)
+                        next_descriptors.append((entry_index, after))
+
+            if next_frame_indices:
+                next_targets = torch.stack(
+                    next_targets_base + next_targets_base
+                )
+                next_values = self.patch_bits_pairs(
+                    next_globals * 2,
+                    next_targets,
+                    torch.stack(before_previous + after_previous),
+                    next_frame_indices,
+                    next_patch_indices,
+                    next_group_sets,
+                    context=before_after_context,
+                )
+                for value, (entry_index, after) in zip(
+                    next_values, next_descriptors
+                ):
+                    (next_after if after else next_before)[entry_index] += value
+
+        for entry_index, entry in enumerate(entries):
+            global_index = int(entry["global_index"])
+            frame_deltas = {
+                global_index: current_after[entry_index]
+                - current_before[entry_index]
+            }
+            if global_index + 1 < N_TOTAL_PAIRS:
+                frame_deltas[global_index + 1] = (
+                    next_after[entry_index] - next_before[entry_index]
+                )
+            result_index = int(entry["result_index"])
+            results[result_index] = (
+                sum(frame_deltas.values()),
+                frame_deltas,
+                {
+                    "current_patches": len(entry["current_patches"]),
+                    "next_patches": next_patch_counts[entry_index],
+                    "current_groups": len(entry["current_groups"]),
+                    "next_groups": next_group_counts[entry_index],
+                },
+            )
+        if any(result is None for result in results):
+            raise RuntimeError("localized batch did not populate every result")
+        return [result for result in results if result is not None]
 
     @torch.no_grad()
     def affected_frame_bits(

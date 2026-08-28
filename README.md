@@ -2,8 +2,8 @@
 
 This is the public reproducibility repository for
 [`semantic-pose-HPAC_CPR1`](https://github.com/commaai/comma_video_compression_challenge/pull/130).
-This fork learns a hard five-symbol token grid, hardens the int4 renderer, then accepts rate-first token moves only when both HPAC rate and total score fall.
-Its 191,084-byte artifact scores 0.169224 vs. #130's 0.172141 (1.695% lower); the latest four-sweep search adds 175 accepted moves, including 39 explicit accuracy-for-rate trades.
+This fork learns a hard five-symbol token grid, hardens the int4 renderer, then searches exact rate-distortion token moves with vectorized HPAC rechecks.
+Its 190,664-byte artifact scores 0.167707 vs. #130's 0.172141 (2.576% lower); localized rechecks are 8.2x faster and four full sweeps are 7.3x faster.
 It preserves two separate guarantees:
 
 1. a byte-exact rebuild of the frozen 191,052-byte CPR1 submission artifact;
@@ -18,10 +18,8 @@ The complete predecessor attribution and originality boundaries are in
 write-up is available at
 <https://fesalfayed.com/blog/semantic-pose-compression/>.
 
-The completed 600-sample RTX 2000 Ada evaluation reports a displayed score of
-`0.17`. The final challenge-hosted `linux-nvidia-t4` evaluation remains
-pending; this repository does not present the Ada result as an official T4
-result.
+The completed official 600-sample `linux-nvidia-t4` evaluation reports a
+full-precision score of `0.1677066352` (displayed as `0.17`).
 
 The canonical charged artifact is:
 

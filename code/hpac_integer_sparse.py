@@ -163,7 +163,12 @@ class SparseIntegerHPAC:
 
     @torch.no_grad()
     def selected_logits_patches(
-        self, current, context, group: int, patch_indices=None
+        self,
+        current,
+        context,
+        group: int,
+        patch_indices=None,
+        frame_indices=None,
     ):
         """Return patch-major logits, optionally for only selected patches."""
         plan = self.plans[group]
@@ -174,28 +179,45 @@ class SparseIntegerHPAC:
             ).permute(0, 3, 1, 2).float()
             patches = self.model._to_patches(one_hot)
         else:
-            if current.shape[0] != 1:
-                raise ValueError("selected patch evaluation requires batch size one")
             patch_indices = torch.as_tensor(
                 patch_indices, dtype=torch.long, device=current.device
             )
+            if frame_indices is None:
+                if current.shape[0] == 1:
+                    frame_indices = torch.zeros_like(patch_indices)
+                elif len(patch_indices) == current.shape[0]:
+                    frame_indices = torch.arange(
+                        current.shape[0], device=current.device
+                    )
+                else:
+                    raise ValueError(
+                        "batched selected patches require one patch per frame "
+                        "or explicit frame indices"
+                    )
+            frame_indices = torch.as_tensor(
+                frame_indices, dtype=torch.long, device=current.device
+            )
+            if frame_indices.shape != patch_indices.shape:
+                raise ValueError("frame and patch indices must have the same shape")
+            flat_indices = frame_indices * self.patch_count + patch_indices
             patch_tokens = current.view(
+                current.shape[0],
                 self.patch_rows,
                 self.patch,
                 self.patch_cols,
                 self.patch,
-            ).permute(0, 2, 1, 3).reshape(
-                self.patch_count, self.patch, self.patch
-            ).index_select(0, patch_indices)
+            ).permute(0, 1, 3, 2, 4).reshape(
+                -1, self.patch, self.patch
+            ).index_select(0, flat_indices)
             patches = F.one_hot(
                 patch_tokens, num_classes=self.model.num_classes
             ).permute(0, 3, 1, 2).float()
-            shift = shift.index_select(0, patch_indices)
-            past = past.index_select(0, patch_indices)
+            shift = shift.index_select(0, flat_indices)
+            past = past.index_select(0, flat_indices)
             scale = (
-                None if scale is None else scale.index_select(0, patch_indices)
+                None if scale is None else scale.index_select(0, flat_indices)
             )
-            spm = None if spm is None else spm.index_select(0, patch_indices)
+            spm = None if spm is None else spm.index_select(0, flat_indices)
         coords = self.model._patch_coord_grid(patches.shape[0], current.device)
         inputs = torch.cat([patches, coords], dim=1)
 

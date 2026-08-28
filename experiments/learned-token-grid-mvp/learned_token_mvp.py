@@ -654,7 +654,7 @@ def main() -> None:
     checkerboard_batch = (
         args.frame_order == "checkerboard"
         and args.rate_model == "hpac"
-        and args.proposal_mode == "rate"
+        and args.proposal_mode in ("rate", "joint")
     )
     if args.accept_exact and args.batch_size != 1 and not checkerboard_batch:
         raise ValueError(
@@ -844,6 +844,7 @@ def main() -> None:
     localized_current_patches = 0
     localized_next_patches = 0
     started = time.time()
+    args.out_dir.mkdir(parents=True, exist_ok=True)
 
     for step in range(1, args.steps + 1):
         if cursor + args.batch_size > len(order):
@@ -870,6 +871,7 @@ def main() -> None:
             rate_proxy_value = 0.0
         else:
             assignments, _ = straight_through_one_hot(logits, temperature)
+            assignments.retain_grad()
             global_ids = torch.tensor(
                 [pair_ids[index] for index in selected],
                 dtype=torch.long,
@@ -902,10 +904,31 @@ def main() -> None:
                 )
             )
             loss.backward()
+            if assignments.grad is None:
+                raise RuntimeError("missing token-assignment gradient")
+            # Rank finite category switches in one-hot space.  The gradient of
+            # softmax logits is distorted by temperature and initialization.
+            logits.grad = assignments.grad.detach()
             loss_value = float(loss.detach())
             seg_proxy_value = float(seg_proxy.detach())
             pose_mse_value = float(pose_mse.detach())
             rate_proxy_value = float(rate_proxy.detach())
+            del (
+                assignments,
+                global_ids,
+                master_eval,
+                master_camera,
+                seg_input,
+                seg_logits,
+                target_seg,
+                seg_proxy,
+                slave,
+                pose_pred,
+                target_pose,
+                pose_mse,
+                rate_proxy,
+                loss,
+            )
         proposal_accepted = False
         candidate_key = None
         step_backtrack_evaluations = 0
@@ -1001,18 +1024,36 @@ def main() -> None:
                 localized_delta_bits = 0.0
                 localized_frame_deltas: dict[int, float] = {}
                 individual_rate_deltas: dict[int, dict[str, object]] = {}
-                for batch_index, parameter_index in enumerate(selected):
-                    if torch.equal(
-                        candidate_tokens[batch_index], tokens_before[batch_index]
-                    ):
-                        continue
-                    delta_bits, frame_deltas, locality = (
-                        hpac_oracle.localized_move_delta(
-                            current_tokens,
-                            parameter_index,
-                            candidate_tokens[batch_index],
-                        )
+                changed_batch_indices = [
+                    batch_index
+                    for batch_index in range(len(selected))
+                    if not torch.equal(
+                        candidate_tokens[batch_index],
+                        tokens_before[batch_index],
                     )
+                ]
+                if len(changed_batch_indices) == 1:
+                    batch_index = changed_batch_indices[0]
+                    localized_results = [hpac_oracle.localized_move_delta(
+                        current_tokens,
+                        selected[batch_index],
+                        candidate_tokens[batch_index],
+                    )]
+                elif changed_batch_indices:
+                    localized_results = hpac_oracle.localized_move_delta_batch(
+                        current_tokens,
+                        [selected[index] for index in changed_batch_indices],
+                        torch.stack([
+                            candidate_tokens[index]
+                            for index in changed_batch_indices
+                        ]),
+                    )
+                else:
+                    localized_results = []
+                for batch_index, localized_result in zip(
+                    changed_batch_indices, localized_results
+                ):
+                    delta_bits, frame_deltas, locality = localized_result
                     localized_delta_bits += delta_bits
                     individual_rate_deltas[batch_index] = {
                         "bits": delta_bits,
@@ -1126,7 +1167,7 @@ def main() -> None:
                             perception_after_move - perception_before_move
                             + projected_hpac_rate_score(rate_delta, 1)
                         )
-                    if rate_delta >= 0 or score_delta >= 0:
+                    if (rate_only and rate_delta >= 0) or score_delta >= 0:
                         continue
 
                     working_tokens[batch_index] = all_candidate_tokens[batch_index]
@@ -1282,23 +1323,31 @@ def main() -> None:
 
         if step % args.eval_every == 0 or step == args.steps:
             learned_tokens = current_tokens.clone()
-            exact = evaluate_exact(
-                model,
-                learned_tokens,
-                pair_ids,
-                slaves,
-                seg_targets,
-                pose_targets,
-                segnet,
-                posenet,
-                pose_output,
-                args.eval_batch_size,
-                device,
-            )
             if global_score_gate:
+                # Changed frames were already evaluated exactly.  Averaging the
+                # cached metrics avoids rendering all 600 again every sweep.
+                exact = aggregate_exact_metrics(exact_frame_metrics)
                 current_global_seg = float(exact["segnet_distortion"])
                 current_global_pose = float(exact["posenet_distortion"])
-            rate = token_rate_statistics(learned_tokens)
+            else:
+                exact = evaluate_exact(
+                    model,
+                    learned_tokens,
+                    pair_ids,
+                    slaves,
+                    seg_targets,
+                    pose_targets,
+                    segnet,
+                    posenet,
+                    pose_output,
+                    args.eval_batch_size,
+                    device,
+                )
+            rate = (
+                None
+                if args.rate_model == "hpac"
+                else token_rate_statistics(learned_tokens)
+            )
             changes = int((learned_tokens != baseline_tokens).sum())
             if args.rate_model == "hpac":
                 selection_key = (
@@ -1312,7 +1361,7 @@ def main() -> None:
                 selection_key = exact[
                     "semantic_pose_score_without_rate"
                 ] + projected_lzma_rate_score(
-                    rate["lzma9_bytes"], args.pairs
+                    rate["lzma9_bytes"], args.pairs  # type: ignore[index]
                 )
             if selection_key < best_key:
                 best_key = selection_key
@@ -1354,12 +1403,26 @@ def main() -> None:
                 "changed_tokens": changes,
                 "changed_fraction": changes / baseline_tokens.numel(),
                 **exact,
-                "token_lzma9_bytes": rate["lzma9_bytes"],
-                "token_spatial_bits_per_token": rate[
-                    "mean_spatial_bits_per_token"
-                ],
+                "token_lzma9_bytes": (
+                    None if rate is None else rate["lzma9_bytes"]
+                ),
+                "token_spatial_bits_per_token": (
+                    None if rate is None else rate["mean_spatial_bits_per_token"]
+                ),
             }
             history.append(record)
+            (args.out_dir / "checkpoint_tokens.u8").write_bytes(
+                learned_tokens.numpy().astype(np.uint8, copy=False).tobytes()
+            )
+            (args.out_dir / "checkpoint.json").write_text(json.dumps({
+                "schema_version": 1,
+                "step": step,
+                "current_hpac_delta_bits": current_hpac_delta_bits,
+                "accepted_proposals": accepted_proposals,
+                "accepted_lossy_rate_proposals": accepted_lossy_rate_proposals,
+                "proposed_moves": proposed_moves,
+                "last_record": record,
+            }, indent=2) + "\n")
             print(json.dumps({"stage": "train", **record}), flush=True)
 
     model.load_state_dict(best_state)
@@ -1471,7 +1534,6 @@ def main() -> None:
             torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
         ),
     }
-    args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     (args.out_dir / "baseline_tokens.u8").write_bytes(
         baseline_tokens.numpy().astype(np.uint8, copy=False).tobytes()

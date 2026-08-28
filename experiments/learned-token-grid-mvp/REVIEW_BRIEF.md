@@ -57,6 +57,7 @@ semantic renderer and token stream while preserving the carrier and HPAC bytes.
 | Tokens + best full-600 int4 renderer | 0.1702539624 | 191,504 B | -1.0964% |
 | Strict full-600 rate-first pass | 0.1700018955 | 191,256 B | -1.2428% |
 | Four category-aware checkerboard sweeps | 0.1692241979 | 191,084 B | -1.6946% |
+| Twenty vectorized rate sweeps + two joint sweeps | 0.1677066352 | 190,664 B | -2.5762% |
 
 The first strict pass's score decomposition was important:
 
@@ -81,6 +82,15 @@ cumulative projected score deltas were `-0.0000403`, `-0.0002515`,
 `-0.0005434`, and `-0.0007829`; there was no clear saturation after four
 sweeps.  The real token stream shrank by 172 bytes and the official full-score
 improvement was `-0.0007777`, only `0.0000052` away from the projection.
+
+The scalability follow-up continued the exact search for twenty sweeps.  It
+tested 12,000 moves and accepted 747, including 149 explicit perception-for-rate
+trades.  The marginal projected gain fell from roughly `1.5e-4` per sweep around
+sweeps 5--10 to `4.8e-5` over the last five, so more identical single-token
+sweeps do not extrapolate to first place.  Two calibrated joint-backprop sweeps
+accepted 35 further moves but were slower and added only `6.3e-5` projected
+score improvement.  The final real stream is 116,604 bytes, decodes exactly,
+and the official 600-sample T4 score is `0.1677066352`.
 
 ## What happened in the smaller experiments
 
@@ -123,11 +133,18 @@ serial.  An A100-SXM4 run with TF32 disabled reproduced the same accepted move
 and ideal-bit delta in 44.0 s (`1.56x` faster than T4 batch 16); leaving TF32 on
 changed the accept/reject decisions and is not used.
 
+The remaining localized rechecks were then vectorized across same-parity frames.
+On 16 identical edits the new path was exactly bit-identical and took 2.08 s
+instead of 17.03 s (`8.20x`).  Four full 600-frame sweeps fell from 2,825.9 s to
+387.5 s (`7.29x`) while reproducing the previous official score within
+`2.2e-6`.  Batch 75 is the largest useful search batch on a 40 GiB A100; batch
+100 exceeds memory once before/after temporal contexts are materialized.
+
 ## Why this is still only a conservative MVP
 
 The grid contains 117,964,800 token positions, but the final artifact differs
-from #130 in only 296.  We did not perform a global joint optimization over all
-tokens and the decoder.  The two rate-first phases tried only 3,000 out of
+from #130 in only 875.  We did not perform a global joint optimization over all
+tokens and the decoder.  The measured search phases tried only 15,600 out of
 roughly 472 million possible single-token category changes.  In particular, we
 did not implement:
 
