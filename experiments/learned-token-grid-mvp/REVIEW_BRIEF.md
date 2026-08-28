@@ -151,19 +151,40 @@ predeclared `0.0002--0.0003` go threshold, so more identical single-token sweeps
 are not the route to first place.  Checkpoints now include the compressed exact
 category-attempt history; the 600-frame file records all 4,800 evaluations.
 
+The structural follow-up replaces one pixel proposal with a constant-category
+rectangle while leaving the exact HPAC/SegNet/PoseNet acceptance gate unchanged.
+Five full 600-frame sweeps tested 24,000 rectangles from `1x2` through `9x9` and
+accepted 142.  Their projected deltas were `-0.00012632`, `-0.00002859`,
+`-0.00005236`, `-0.00003079`, and `-0.00001362`.  A `13x13`--`17x17` smoke test
+made no final accepted change, while the largest allowed shape dominated at
+both `5x5` and `9x9`; useful scale therefore ends somewhere around this range
+for the current rectangular family.
+
+The final real range-coded stream is 116,428 bytes and the archive is 190,488
+bytes, 176 bytes below the previous best.  A same-L40S official A/B evaluation
+is required because DALI target decoding shifts absolute SegNet/PoseNet values
+between T4 and L40S.  On L40S the unchanged control scored `0.1682625922` and
+the structural grid scored `0.1681259044`, an actual improvement of
+`0.0001366878` (`0.0812%`).  Applying only that measured A/B delta to the prior
+T4 result projects `0.1675699474`, or `2.6556%` below #130 and still rank 3.
+The internal ideal-bit/perception projection predicted `0.0002516870`, so it
+overstated the gain by about 46%; the byte prediction was close (188 predicted
+versus 176 actual), and nearly all error came from the cached perception gate.
+
 ## Why this is still only a conservative MVP
 
-The grid contains 117,964,800 token positions.  The deployed artifact differs
-from #130 in only 875 positions and the best Top-K grid in 913.  We did not
-perform a global joint optimization over all tokens and the decoder.  The
-production-scale search phases tried only 20,400 out of roughly 472 million
-possible single-token category changes.  In particular, we did not implement:
+The grid contains 117,964,800 token positions.  The previous deployed artifact
+differs from #130 in 875 positions and the final structural grid in 1,202.  We
+did not perform a global joint optimization over all tokens and the decoder.
+The production-scale search phases tried only 20,400 single-token and 24,000
+rectangular proposals.  In particular, we did not implement:
 
 - a persistent freely learned grid over all 600 frames with a scalable discrete
   optimizer;
 - invalidation and selective re-ranking of attempt history after nearby
   accepted changes alter the HPAC context;
-- region, contour, block or temporal-tube moves instead of isolated pixels;
+- freely growing connected regions, contours or temporal-tube moves instead of
+  the fixed rectangular family;
 - exact final arithmetic-coded byte length inside every acceptance decision
   (the oracle matches deployed HPAC probabilities and ideal bits);
 - retraining HPAC for the changed token distribution;
@@ -176,10 +197,11 @@ of this narrow implementation.  It is not an estimate of the idea's ceiling.
 
 Please focus on missed algorithmic potential rather than style:
 
-1. Does the gradient and exact-evaluation path optimize the official objective
-   without a scale, indexing, context or projection error?
-2. HPAC ideal bits predicted about 449 saved bytes while the real range coder
-   saved 248.  Can acceptance cheaply target actual coder bytes more closely?
+1. Why did the cached perception gate overstate the structural A/B gain by about
+   46%, and how should it be aligned with the hardware-dependent official DALI
+   pipeline without running a full official evaluation per candidate?
+2. The latest HPAC ideal-bit delta predicted about 188 saved bytes and the real
+   range coder saved 176.  Can acceptance cheaply target those final bytes?
 3. Which cheap proposal model can rank structural candidates better than direct
    one-symbol HPAC surprise without putting an unreliable gradient in the gate?
 4. What is the simplest scalable rate-first search over structural moves:

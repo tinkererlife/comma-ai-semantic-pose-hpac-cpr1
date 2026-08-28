@@ -33,6 +33,21 @@ class TokenMove:
     direct_rate_benefit_bits: float
 
 
+@dataclass(frozen=True)
+class TokenRegionMove:
+    """Set one small rectangular token region to a shared category."""
+
+    batch_index: int
+    parameter_index: int
+    row: int
+    col: int
+    height: int
+    width: int
+    after: int
+    benefit: float
+    direct_rate_benefit_bits: float
+
+
 @dataclass
 class BacktrackResult:
     tokens: torch.Tensor
@@ -1018,6 +1033,139 @@ def rank_token_moves(
         ),
         "proposal_mode": "rate" if rate_only else "joint",
         "independent_alternatives": independent_alternatives,
+    }
+
+
+def rank_token_regions(
+    current_tokens: torch.Tensor,
+    selected: list[int],
+    max_regions_per_frame: int,
+    attempted_masks: list[torch.Tensor],
+    category_rate_bits: torch.Tensor,
+    shapes: tuple[tuple[int, int], ...],
+    minimum_distance: int = 0,
+) -> tuple[list[TokenRegionMove], dict[str, float | int | str]]:
+    """Rank small constant-category regions by summed direct HPAC benefit."""
+    if max_regions_per_frame < 1 or not shapes:
+        raise ValueError("region count and shapes must be non-empty")
+    if category_rate_bits.shape[:-1] != current_tokens.shape:
+        raise ValueError("category rate table does not match tokens")
+    if len(selected) != len(current_tokens):
+        raise ValueError("selected indices do not match the batch size")
+
+    current = current_tokens.to(category_rate_bits.device).long()
+    current_rate = category_rate_bits.gather(
+        -1, current.unsqueeze(-1)
+    ).squeeze(-1)
+    pixel_benefit = (
+        current_rate.unsqueeze(-1) - category_rate_bits
+    ).permute(0, 3, 1, 2)
+    same_category = F.one_hot(current, N_TOKENS).permute(0, 3, 1, 2).float()
+    batch, _, height, width = pixel_benefit.shape
+    best = torch.full_like(pixel_benefit, -torch.inf)
+    best_shape = torch.full(
+        (batch, N_TOKENS, height, width),
+        -1,
+        dtype=torch.int16,
+        device=pixel_benefit.device,
+    )
+    for shape_index, (region_height, region_width) in enumerate(shapes):
+        if region_height < 1 or region_width < 1:
+            raise ValueError("region dimensions must be positive")
+        if region_height > height or region_width > width:
+            continue
+        area = region_height * region_width
+        score = F.avg_pool2d(
+            pixel_benefit,
+            (region_height, region_width),
+            stride=1,
+        ) * area
+        unchanged = F.avg_pool2d(
+            same_category,
+            (region_height, region_width),
+            stride=1,
+        ) * area
+        score = score.masked_fill(unchanged == area, -torch.inf)
+        valid_height, valid_width = score.shape[-2:]
+        destination = best[:, :, :valid_height, :valid_width]
+        better = score > destination
+        destination.copy_(torch.where(better, score, destination))
+        shape_destination = best_shape[:, :, :valid_height, :valid_width]
+        shape_destination.copy_(torch.where(
+            better,
+            torch.full_like(shape_destination, shape_index),
+            shape_destination,
+        ))
+
+    attempted = torch.stack(
+        [attempted_masks[index] for index in selected]
+    ).to(best.device)
+    category_bits = 1 << torch.arange(N_TOKENS, device=best.device)
+    best.masked_fill_(
+        attempted.unsqueeze(1).bitwise_and(
+            category_bits.view(1, -1, 1, 1)
+        ).bool(),
+        -torch.inf,
+    )
+
+    moves: list[TokenRegionMove] = []
+    positive_candidates = 0
+    for batch_index, parameter_index in enumerate(selected):
+        flat_scores = best[batch_index].reshape(-1)
+        positive = flat_scores > 0
+        positive_count = int(positive.sum())
+        positive_candidates += positive_count
+        if not positive_count:
+            continue
+        pool_size = min(positive_count, max_regions_per_frame * 64)
+        ranked = flat_scores.masked_fill(
+            ~positive, -torch.inf
+        ).topk(pool_size, sorted=True).indices
+        chosen_anchors: list[tuple[int, int]] = []
+        for flat_index_tensor in ranked:
+            flat_index = int(flat_index_tensor)
+            after, anchor_index = divmod(flat_index, height * width)
+            row, col = divmod(anchor_index, width)
+            if minimum_distance and any(
+                max(abs(row - other_row), abs(col - other_col))
+                < minimum_distance
+                for other_row, other_col in chosen_anchors
+            ):
+                continue
+            shape_index = int(best_shape[batch_index, after, row, col])
+            if shape_index < 0:
+                continue
+            region_height, region_width = shapes[shape_index]
+            moves.append(TokenRegionMove(
+                batch_index=batch_index,
+                parameter_index=parameter_index,
+                row=row,
+                col=col,
+                height=region_height,
+                width=region_width,
+                after=after,
+                benefit=float(best[batch_index, after, row, col]),
+                direct_rate_benefit_bits=float(
+                    best[batch_index, after, row, col]
+                ),
+            ))
+            chosen_anchors.append((row, col))
+            attempted_masks[parameter_index][row, col] |= 1 << after
+            if len(chosen_anchors) == max_regions_per_frame:
+                break
+
+    return moves, {
+        "gradient_selected_pixels": len(moves),
+        "gradient_positive_candidates": positive_candidates,
+        "gradient_largest_benefit": max(
+            (move.benefit for move in moves), default=0.0
+        ),
+        "gradient_direct_rate_benefit_bits": sum(
+            move.direct_rate_benefit_bits for move in moves
+        ),
+        "proposal_mode": "rate-regions",
+        "independent_alternatives": True,
+        "region_shapes": ",".join(f"{h}x{w}" for h, w in shapes),
     }
 
 

@@ -34,10 +34,12 @@ from safetensors.torch import load_file
 from hpac_token_search import (
     BacktrackResult,
     HPACRateOracle,
+    TokenRegionMove,
     accept_with_backtracking,
     apply_token_moves,
     projected_hpac_rate_score,
     rank_token_moves,
+    rank_token_regions,
 )
 
 
@@ -95,6 +97,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=60,
         help="Maximum independent Top-K alternatives in one localized HPAC batch.",
+    )
+    parser.add_argument(
+        "--proposal-shapes",
+        choices=("pixel", "runs", "multiscale", "large", "huge", "mega"),
+        default="pixel",
+        help="Exact candidate family: pixels or small constant-category regions.",
     )
     parser.add_argument(
         "--proposal-min-distance",
@@ -716,10 +724,12 @@ def main() -> None:
         ]
         if any(count % args.batch_size for count in color_counts if count):
             raise ValueError("batch size must divide each checkerboard color")
-    elif args.proposal_candidates_per_frame != 1:
+    elif args.proposal_candidates_per_frame != 1 or args.proposal_shapes != "pixel":
         raise ValueError(
             "Top-K alternatives require exact HPAC checkerboard batching"
         )
+    if args.proposal_shapes != "pixel" and args.proposal_mode != "rate":
+        raise ValueError("structural candidates currently require rate proposals")
     if args.rate_model == "hpac" and not args.accept_exact:
         raise ValueError("the HPAC rate oracle requires --accept-exact")
     if args.finetune_renderer:
@@ -807,6 +817,7 @@ def main() -> None:
             "proposal_pixels_per_frame": args.max_token_pixels_per_frame,
             "proposal_candidates_per_frame": args.proposal_candidates_per_frame,
             "candidate_batch_size": args.candidate_batch_size,
+            "proposal_shapes": args.proposal_shapes,
             "proposal_min_distance": args.proposal_min_distance,
             "backtrack_max_evals": args.backtrack_max_evals,
             "score_gate": (
@@ -901,6 +912,8 @@ def main() -> None:
     localized_current_patches = 0
     localized_next_patches = 0
     topk_candidate_evaluations = 0
+    accepted_region_shapes: dict[str, int] = {}
+    accepted_region_token_changes = 0
     started = time.time()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1026,25 +1039,49 @@ def main() -> None:
             rate_proxy_value = float(
                 category_rate_bits.gather(-1, current_for_rate).mean()
             )
-            independent_topk = (
-                checkerboard_batch and args.proposal_candidates_per_frame > 1
+            independent_topk = checkerboard_batch and (
+                args.proposal_candidates_per_frame > 1
+                or args.proposal_shapes != "pixel"
             )
-            moves, gradient_stats = rank_token_moves(
-                logits,
-                tokens_before,
-                selected,
-                (
-                    args.proposal_candidates_per_frame
-                    if independent_topk
-                    else args.max_token_pixels_per_frame
-                ),
-                attempted_masks,
-                category_rate_bits=category_rate_bits,
-                rate_score_per_bit=projected_hpac_rate_score(1.0, len(selected)),
-                minimum_distance=args.proposal_min_distance,
-                rate_only=rate_only,
-                independent_alternatives=independent_topk,
-            )
+            if args.proposal_shapes == "pixel":
+                moves, gradient_stats = rank_token_moves(
+                    logits,
+                    tokens_before,
+                    selected,
+                    (
+                        args.proposal_candidates_per_frame
+                        if independent_topk
+                        else args.max_token_pixels_per_frame
+                    ),
+                    attempted_masks,
+                    category_rate_bits=category_rate_bits,
+                    rate_score_per_bit=projected_hpac_rate_score(
+                        1.0, len(selected)
+                    ),
+                    minimum_distance=args.proposal_min_distance,
+                    rate_only=rate_only,
+                    independent_alternatives=independent_topk,
+                )
+            else:
+                if args.proposal_shapes == "runs":
+                    region_shapes = ((1, 2), (2, 1))
+                elif args.proposal_shapes == "multiscale":
+                    region_shapes = ((1, 2), (2, 1), (2, 2), (3, 3))
+                elif args.proposal_shapes == "large":
+                    region_shapes = ((1, 4), (4, 1), (3, 3), (4, 4), (5, 5))
+                elif args.proposal_shapes == "huge":
+                    region_shapes = ((1, 8), (8, 1), (5, 5), (7, 7), (9, 9))
+                else:
+                    region_shapes = ((1, 16), (16, 1), (9, 9), (13, 13), (17, 17))
+                moves, gradient_stats = rank_token_regions(
+                    tokens_before,
+                    selected,
+                    args.proposal_candidates_per_frame,
+                    attempted_masks,
+                    category_rate_bits,
+                    region_shapes,
+                    args.proposal_min_distance,
+                )
             proposed_moves += len(moves)
             if global_score_gate:
                 perception_before = semantic_pose_score(
@@ -1187,9 +1224,17 @@ def main() -> None:
                     candidate_pair_ids = []
                     for move in move_chunk:
                         candidate = tokens_before[move.batch_index].clone()
-                        if int(candidate[move.row, move.col]) != move.before:
-                            raise ValueError("Top-K move no longer matches source token")
-                        candidate[move.row, move.col] = move.after
+                        if isinstance(move, TokenRegionMove):
+                            candidate[
+                                move.row : move.row + move.height,
+                                move.col : move.col + move.width,
+                            ] = move.after
+                        else:
+                            if int(candidate[move.row, move.col]) != move.before:
+                                raise ValueError(
+                                    "Top-K move no longer matches source token"
+                                )
+                            candidate[move.row, move.col] = move.after
                         candidate_frames.append(candidate)
                         parameter_index = selected[move.batch_index]
                         candidate_indices.append(parameter_index)
@@ -1301,7 +1346,14 @@ def main() -> None:
                         perception_before_move,
                         perception_after_move,
                     ) = best_candidate
-                    working_tokens[batch_index, move.row, move.col] = move.after
+                    if isinstance(move, TokenRegionMove):
+                        working_tokens[
+                            batch_index,
+                            move.row : move.row + move.height,
+                            move.col : move.col + move.width,
+                        ] = move.after
+                    else:
+                        working_tokens[batch_index, move.row, move.col] = move.after
                     accepted_moves.append(move)
                     accepted_per_frame[batch_index] = exact_after
                     accepted_rate_delta += rate_delta
@@ -1472,6 +1524,19 @@ def main() -> None:
                         "lossy_accepted_count",
                         accepted_count if step_perception_delta > 0 else 0,
                     )
+                for move in result.accepted_moves:
+                    if isinstance(move, TokenRegionMove):
+                        shape = f"{move.height}x{move.width}"
+                        accepted_region_shapes[shape] = (
+                            accepted_region_shapes.get(shape, 0) + 1
+                        )
+                        accepted_region_token_changes += int((
+                            tokens_before[
+                                move.batch_index,
+                                move.row : move.row + move.height,
+                                move.col : move.col + move.width,
+                            ] != move.after
+                        ).sum())
                 current_tokens[selected] = result.tokens
                 current_hpac_delta_bits += step_hpac_delta_bits
                 for batch_index, parameter_index in enumerate(selected):
@@ -1619,6 +1684,8 @@ def main() -> None:
                 "step_total_score_delta": step_total_delta,
                 "accepted_rate_saving_proposals": accepted_rate_saving_proposals,
                 "accepted_lossy_rate_proposals": accepted_lossy_rate_proposals,
+                "accepted_region_shapes": accepted_region_shapes,
+                "accepted_region_token_changes": accepted_region_token_changes,
                 "hpac_ideal_delta_bits": current_hpac_delta_bits,
                 "hpac_rate_score_delta": projected_hpac_rate_score(
                     current_hpac_delta_bits, args.pairs
@@ -1757,6 +1824,8 @@ def main() -> None:
         "localized_current_patches": localized_current_patches,
         "localized_next_patches": localized_next_patches,
         "topk_candidate_evaluations": topk_candidate_evaluations,
+        "accepted_region_shapes": accepted_region_shapes,
+        "accepted_region_token_changes": accepted_region_token_changes,
         "proxy_total_score_delta_after_int4": (
             learned_metrics_quantized["semantic_pose_score_without_rate"]
             - baseline_metrics["semantic_pose_score_without_rate"]

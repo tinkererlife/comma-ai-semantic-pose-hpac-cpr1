@@ -9,6 +9,7 @@ from hpac_token_search import (
     accept_with_backtracking,
     projected_hpac_rate_score,
     quantized_probability_bits,
+    rank_token_regions,
     rank_token_moves,
 )
 from materialize_learned_cache import replace_tokens
@@ -241,6 +242,50 @@ def test_attempt_history_roundtrip() -> None:
         pack_attempt_history(attempted), frames=2, height=2, width=2
     )
     assert all(torch.equal(before, after) for before, after in zip(attempted, restored))
+
+
+def test_region_ranker_selects_best_shape_and_applies_anchor_history() -> None:
+    tokens = torch.zeros((1, 3, 3), dtype=torch.long)
+    costs = torch.full((1, 3, 3, 5), 9.0)
+    costs[..., 0] = 5.0
+    costs[..., 1] = 4.0
+    costs[0, :2, :2, 1] = 0.0
+    attempted = [torch.zeros((3, 3), dtype=torch.uint8)]
+    moves, stats = rank_token_regions(
+        tokens,
+        [0],
+        1,
+        attempted,
+        costs,
+        ((1, 2), (2, 2)),
+    )
+    move = moves[0]
+    assert (move.row, move.col, move.height, move.width, move.after) == (
+        0, 0, 2, 2, 1
+    )
+    assert move.direct_rate_benefit_bits == 20.0
+    assert int(attempted[0][0, 0]) == 1 << 1
+    assert stats["region_shapes"] == "1x2,2x2"
+
+
+def test_region_ranker_distance_keeps_diverse_anchors() -> None:
+    tokens = torch.zeros((1, 4, 4), dtype=torch.long)
+    costs = torch.full((1, 4, 4, 5), 10.0)
+    costs[..., 0] = 5.0
+    costs[..., 1] = 4.0
+    costs[0, 0, :2, 1] = 0.0
+    costs[0, 1, :2, 1] = 0.1
+    costs[0, 3, 2:, 1] = 0.2
+    moves, _ = rank_token_regions(
+        tokens,
+        [0],
+        2,
+        [torch.zeros((4, 4), dtype=torch.uint8)],
+        costs,
+        ((1, 2),),
+        minimum_distance=3,
+    )
+    assert [(move.row, move.col) for move in moves] == [(0, 0), (3, 2)]
 
 
 def test_global_perception_replaces_one_frame_before_pose_sqrt() -> None:
