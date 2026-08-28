@@ -162,22 +162,47 @@ class SparseIntegerHPAC:
         return self._apply_codes(result, module)
 
     @torch.no_grad()
-    def selected_logits(self, current, context, group: int):
+    def selected_logits_patches(
+        self, current, context, group: int, patch_indices=None
+    ):
+        """Return patch-major logits, optionally for only selected patches."""
         plan = self.plans[group]
-        one_hot = F.one_hot(
-            current, num_classes=self.model.num_classes
-        ).permute(0, 3, 1, 2).float()
-        patches = self.model._to_patches(one_hot)
-        coords = self.model._patch_coord_grid(
-            self.patch_count, current.device
-        )
+        shift, past, scale, spm = context
+        if patch_indices is None:
+            one_hot = F.one_hot(
+                current, num_classes=self.model.num_classes
+            ).permute(0, 3, 1, 2).float()
+            patches = self.model._to_patches(one_hot)
+        else:
+            if current.shape[0] != 1:
+                raise ValueError("selected patch evaluation requires batch size one")
+            patch_indices = torch.as_tensor(
+                patch_indices, dtype=torch.long, device=current.device
+            )
+            patch_tokens = current.view(
+                self.patch_rows,
+                self.patch,
+                self.patch_cols,
+                self.patch,
+            ).permute(0, 2, 1, 3).reshape(
+                self.patch_count, self.patch, self.patch
+            ).index_select(0, patch_indices)
+            patches = F.one_hot(
+                patch_tokens, num_classes=self.model.num_classes
+            ).permute(0, 3, 1, 2).float()
+            shift = shift.index_select(0, patch_indices)
+            past = past.index_select(0, patch_indices)
+            scale = (
+                None if scale is None else scale.index_select(0, patch_indices)
+            )
+            spm = None if spm is None else spm.index_select(0, patch_indices)
+        coords = self.model._patch_coord_grid(patches.shape[0], current.device)
         inputs = torch.cat([patches, coords], dim=1)
 
         hidden = requantize(
             self._conv_a(inputs, plan.h_positions), 1,
             -self.model.activation_bound, self.model.activation_bound,
         )
-        shift, past, scale, spm = context
         if scale is not None:
             hidden = requantize(
                 hidden * (16 + scale.squeeze(-1).transpose(1, 2)), 4,
@@ -212,5 +237,14 @@ class SparseIntegerHPAC:
         logits = requantize(
             self._apply_codes(logits, head), 3, -32768, 32767
         ) / 8.0
-        logits = logits.reshape(-1, self.model.num_classes)[plan.output_order]
-        return logits
+        return logits.reshape(
+            patches.shape[0], -1, self.model.num_classes
+        )
+
+    @torch.no_grad()
+    def selected_logits(self, current, context, group: int):
+        plan = self.plans[group]
+        logits = self.selected_logits_patches(current, context, group)
+        batch = current.shape[0]
+        logits = logits.reshape(batch, -1, self.model.num_classes)
+        return logits[:, plan.output_order].reshape(-1, self.model.num_classes)

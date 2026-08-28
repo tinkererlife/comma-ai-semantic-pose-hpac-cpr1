@@ -32,8 +32,10 @@ import torch.nn.functional as F
 from safetensors.torch import load_file
 
 from hpac_token_search import (
+    BacktrackResult,
     HPACRateOracle,
     accept_with_backtracking,
+    apply_token_moves,
     projected_hpac_rate_score,
     rank_token_moves,
 )
@@ -61,6 +63,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pairs", type=int, default=32)
     parser.add_argument("--steps", type=int, default=320)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--frame-order",
+        choices=("random", "checkerboard"),
+        default="random",
+        help="Checkerboard batches contain only temporally independent frames.",
+    )
     parser.add_argument("--eval-batch-size", type=int, default=2)
     parser.add_argument("--eval-every", type=int, default=80)
     parser.add_argument("--token-lr", type=float, default=0.15)
@@ -359,12 +367,15 @@ def evaluate_exact(
     pose_output,
     batch_size: int,
     device: torch.device,
-) -> dict[str, float]:
+    return_per_frame: bool = False,
+) -> dict[str, float | list[dict[str, float]]]:
     model.eval()
-    mismatches = 0
+    mismatches = torch.zeros((), dtype=torch.int64, device=device)
     pixels = 0
-    pose_error = 0.0
+    pose_error = torch.zeros((), dtype=torch.float64, device=device)
     samples = 0
+    frame_mismatch_batches: list[torch.Tensor] = []
+    frame_pose_error_batches: list[torch.Tensor] = []
     local_ids = list(range(len(pair_ids)))
     for selected in chunks(local_ids, batch_size):
         global_ids = torch.tensor(
@@ -375,25 +386,52 @@ def evaluate_exact(
         master_camera, seg_input = camera_and_seg_input(master_eval)
         seg_pred = segnet(seg_input).argmax(dim=1)
         target_seg = seg_targets[selected].to(device)
-        mismatches += int((seg_pred != target_seg).sum())
+        frame_mismatches = (seg_pred != target_seg).reshape(
+            len(selected), -1
+        ).sum(dim=1)
+        mismatches += frame_mismatches.sum()
         pixels += target_seg.numel()
 
         slave = slaves[selected].to(device=device, dtype=torch.float32)
         pose_pred = pose_output(posenet, torch.stack([slave, master_camera], dim=1))
         target_pose = pose_targets[selected].to(device)
-        pose_error += float((pose_pred - target_pose).square().sum())
+        frame_pose_error = (pose_pred - target_pose).square().reshape(
+            len(selected), -1
+        ).sum(dim=1)
+        pose_error += frame_pose_error.double().sum()
         samples += target_pose.numel()
 
-    seg_distortion = mismatches / pixels
-    pose_distortion = pose_error / samples
-    semantic_pose_score = 100.0 * seg_distortion + math.sqrt(
-        10.0 * pose_distortion
-    )
-    return {
+        if return_per_frame:
+            frame_mismatch_batches.append(frame_mismatches)
+            frame_pose_error_batches.append(frame_pose_error)
+
+    seg_distortion = float(mismatches) / pixels
+    pose_distortion = float(pose_error) / samples
+    metrics: dict[str, float | list[dict[str, float]]] = {
         "segnet_distortion": seg_distortion,
         "posenet_distortion": pose_distortion,
-        "semantic_pose_score_without_rate": semantic_pose_score,
+        "semantic_pose_score_without_rate": semantic_pose_score(
+            seg_distortion, pose_distortion
+        ),
     }
+    if return_per_frame:
+        frame_pixels = seg_targets[0].numel()
+        frame_samples = pose_targets[0].numel()
+        frame_mismatches = torch.cat(frame_mismatch_batches).cpu().tolist()
+        frame_pose_errors = torch.cat(frame_pose_error_batches).cpu().tolist()
+        per_frame = []
+        for mismatch, error in zip(frame_mismatches, frame_pose_errors):
+            frame_seg = mismatch / frame_pixels
+            frame_pose = error / frame_samples
+            per_frame.append({
+                "segnet_distortion": frame_seg,
+                "posenet_distortion": frame_pose,
+                "semantic_pose_score_without_rate": semantic_pose_score(
+                    frame_seg, frame_pose
+                ),
+            })
+        metrics["per_frame"] = per_frame
+    return metrics
 
 
 def initialize_logits(tokens: torch.Tensor, margin: float) -> torch.nn.ParameterList:
@@ -546,6 +584,44 @@ def projected_lzma_rate_score(lzma_bytes: int, frames: int) -> float:
     )
 
 
+def semantic_pose_score(seg_distortion: float, pose_distortion: float) -> float:
+    return 100.0 * seg_distortion + math.sqrt(10.0 * pose_distortion)
+
+
+def aggregate_exact_metrics(
+    metrics: list[dict[str, float]],
+) -> dict[str, float]:
+    seg = sum(item["segnet_distortion"] for item in metrics) / len(metrics)
+    pose = sum(item["posenet_distortion"] for item in metrics) / len(metrics)
+    return {
+        "segnet_distortion": seg,
+        "posenet_distortion": pose,
+        "semantic_pose_score_without_rate": semantic_pose_score(seg, pose),
+    }
+
+
+def replace_global_perception(
+    global_seg: float,
+    global_pose: float,
+    local_before: dict[str, float],
+    local_after: dict[str, float],
+    changed_frames: int,
+) -> tuple[float, float, float]:
+    """Replace equal-sized frame contributions in the official 600-frame score."""
+    weight = changed_frames / N_TOTAL_PAIRS
+    candidate_seg = global_seg + weight * (
+        local_after["segnet_distortion"] - local_before["segnet_distortion"]
+    )
+    candidate_pose = global_pose + weight * (
+        local_after["posenet_distortion"] - local_before["posenet_distortion"]
+    )
+    return (
+        candidate_seg,
+        candidate_pose,
+        semantic_pose_score(candidate_seg, candidate_pose),
+    )
+
+
 def quantized_renderer_copy(model: torch.nn.Module):
     from pack_semantic_pose import pack_semantic  # pylint: disable=import-error,import-outside-toplevel
 
@@ -575,8 +651,26 @@ def main() -> None:
         raise ValueError("--proposal-min-distance cannot be negative")
     if args.backtrack_max_evals < 1:
         raise ValueError("--backtrack-max-evals must be positive")
-    if args.accept_exact and args.batch_size != 1:
-        raise ValueError("exact atomic acceptance currently requires --batch-size 1")
+    checkerboard_batch = (
+        args.frame_order == "checkerboard"
+        and args.rate_model == "hpac"
+        and args.proposal_mode == "rate"
+    )
+    if args.accept_exact and args.batch_size != 1 and not checkerboard_batch:
+        raise ValueError(
+            "exact batches require rate-only HPAC with --frame-order checkerboard"
+        )
+    if checkerboard_batch:
+        if args.max_token_pixels_per_frame != 1:
+            raise ValueError("checkerboard batching currently requires one move per frame")
+        color_counts = [
+            sum(pair_id % 2 == color for pair_id in range(
+                args.start_pair, args.start_pair + args.pairs
+            ))
+            for color in (0, 1)
+        ]
+        if any(count % args.batch_size for count in color_counts if count):
+            raise ValueError("batch size must divide each checkerboard color")
     if args.rate_model == "hpac" and not args.accept_exact:
         raise ValueError("the HPAC rate oracle requires --accept-exact")
     if args.finetune_renderer:
@@ -589,6 +683,10 @@ def main() -> None:
     np.random.seed(args.seed)
     random.seed(args.seed)
     device = torch.device(args.device)
+    if device.type == "cuda":
+        # Keep A100/H100 TF32 kernels from changing exact accept/reject decisions.
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     recipe_root = args.recipe_root.resolve()
     challenge_root = args.challenge_root.resolve()
     cache_path = args.cache or (
@@ -660,6 +758,10 @@ def main() -> None:
             "proposal_pixels_per_frame": args.max_token_pixels_per_frame,
             "proposal_min_distance": args.proposal_min_distance,
             "backtrack_max_evals": args.backtrack_max_evals,
+            "score_gate": (
+                "global_official" if args.pairs == N_TOTAL_PAIRS else "local_projected"
+            ),
+            "attempt_history": "token_category",
         }), flush=True)
 
     slaves = render_frozen_slaves(
@@ -678,13 +780,34 @@ def main() -> None:
         pose_output,
         args.eval_batch_size,
         device,
+        return_per_frame=args.rate_model == "hpac",
+    )
+    exact_frame_metrics = (
+        baseline_metrics.pop("per_frame")
+        if args.rate_model == "hpac"
+        else [None] * args.pairs
     )
     baseline_rate = token_rate_statistics(baseline_tokens)
     baseline_metrics["token_rate"] = baseline_rate
     print(json.dumps({"stage": "baseline", **baseline_metrics}), flush=True)
 
     generator = torch.Generator().manual_seed(args.seed)
-    order = torch.randperm(args.pairs, generator=generator).tolist()
+    def fresh_order() -> list[int]:
+        if args.frame_order == "random":
+            return torch.randperm(args.pairs, generator=generator).tolist()
+        colors = []
+        for color in (0, 1):
+            members = [
+                index for index, pair_id in enumerate(pair_ids)
+                if pair_id % 2 == color
+            ]
+            permutation = torch.randperm(
+                len(members), generator=generator
+            ).tolist()
+            colors.extend(members[index] for index in permutation)
+        return colors
+
+    order = fresh_order()
     cursor = 0
     history: list[dict[str, object]] = []
     best_key = (
@@ -699,9 +822,16 @@ def main() -> None:
     current_hpac_delta_bits = 0.0
     best_hpac_delta_bits = 0.0
     attempted_masks = [
-        torch.zeros((EVAL_H, EVAL_W), dtype=torch.bool)
+        torch.zeros(
+            (EVAL_H, EVAL_W),
+            dtype=torch.uint8 if args.rate_model == "hpac" else torch.bool,
+        )
         for _ in range(args.pairs)
     ]
+    global_score_gate = args.rate_model == "hpac" and args.pairs == N_TOTAL_PAIRS
+    current_global_seg = float(baseline_metrics["segnet_distortion"])
+    current_global_pose = float(baseline_metrics["posenet_distortion"])
+    current_rate_frame_bits: dict[int, float] = {}
     exact_frame_keys: list[float | None] = [None] * args.pairs
     accepted_proposals = 0
     accepted_rate_saving_proposals = 0
@@ -710,11 +840,14 @@ def main() -> None:
     proposed_moves = 0
     backtrack_evaluations = 0
     rejected_proposal_batches = 0
+    localized_rate_rechecks = 0
+    localized_current_patches = 0
+    localized_next_patches = 0
     started = time.time()
 
     for step in range(1, args.steps + 1):
         if cursor + args.batch_size > len(order):
-            order = torch.randperm(args.pairs, generator=generator).tolist()
+            order = fresh_order()
             cursor = 0
         selected = order[cursor : cursor + args.batch_size]
         cursor += args.batch_size
@@ -725,39 +858,54 @@ def main() -> None:
 
         tokens_before = current_tokens[selected].clone()
         logits = local_logits_from_tokens(tokens_before, args.init_margin, device)
-        assignments, _ = straight_through_one_hot(logits, temperature)
-        global_ids = torch.tensor(
-            [pair_ids[index] for index in selected], dtype=torch.long, device=device
+        rate_only = args.rate_model == "hpac" and (
+            args.proposal_mode == "rate"
+            or (args.proposal_mode == "alternating" and step % 2 == 0)
         )
-        master_eval = renderer_from_assignments(model, assignments, global_ids)
-        master_camera, seg_input = camera_and_seg_input(master_eval)
-        seg_logits = segnet(seg_input)
-        target_seg = seg_targets[selected].to(device)
-        seg_proxy = expected_flip_loss(seg_logits, target_seg)
-
-        slave = slaves[selected].to(device=device, dtype=torch.float32)
-        pose_pred = pose_output(posenet, torch.stack([slave, master_camera], dim=1))
-        target_pose = pose_targets[selected].to(device)
-        pose_mse = (pose_pred - target_pose).square().mean()
-        rate_proxy = (
-            differentiable_rate_proxy(assignments)
-            if args.rate_model == "lzma"
-            else torch.zeros((), device=device)
-        )
-        loss = (
-            args.seg_weight * seg_proxy
-            + args.pose_weight * torch.sqrt(10.0 * pose_mse + 1e-12)
-            + (
-                args.rate_lambda * rate_proxy
-                if args.rate_model == "lzma"
-                else 0.0
+        if rate_only:
+            logits = logits.detach()
+            loss_value = 0.0
+            seg_proxy_value = 0.0
+            pose_mse_value = 0.0
+            rate_proxy_value = 0.0
+        else:
+            assignments, _ = straight_through_one_hot(logits, temperature)
+            global_ids = torch.tensor(
+                [pair_ids[index] for index in selected],
+                dtype=torch.long,
+                device=device,
             )
-        )
-        loss.backward()
-        loss_value = float(loss.detach())
-        seg_proxy_value = float(seg_proxy.detach())
-        pose_mse_value = float(pose_mse.detach())
-        rate_proxy_value = float(rate_proxy.detach())
+            master_eval = renderer_from_assignments(model, assignments, global_ids)
+            master_camera, seg_input = camera_and_seg_input(master_eval)
+            seg_logits = segnet(seg_input)
+            target_seg = seg_targets[selected].to(device)
+            seg_proxy = expected_flip_loss(seg_logits, target_seg)
+
+            slave = slaves[selected].to(device=device, dtype=torch.float32)
+            pose_pred = pose_output(
+                posenet, torch.stack([slave, master_camera], dim=1)
+            )
+            target_pose = pose_targets[selected].to(device)
+            pose_mse = (pose_pred - target_pose).square().mean()
+            rate_proxy = (
+                differentiable_rate_proxy(assignments)
+                if args.rate_model == "lzma"
+                else torch.zeros((), device=device)
+            )
+            loss = (
+                args.seg_weight * seg_proxy
+                + args.pose_weight * torch.sqrt(10.0 * pose_mse + 1e-12)
+                + (
+                    args.rate_lambda * rate_proxy
+                    if args.rate_model == "lzma"
+                    else 0.0
+                )
+            )
+            loss.backward()
+            loss_value = float(loss.detach())
+            seg_proxy_value = float(seg_proxy.detach())
+            pose_mse_value = float(pose_mse.detach())
+            rate_proxy_value = float(rate_proxy.detach())
         proposal_accepted = False
         candidate_key = None
         step_backtrack_evaluations = 0
@@ -767,33 +915,35 @@ def main() -> None:
         step_total_delta = 0.0
 
         if args.rate_model == "hpac":
-            exact_before = evaluate_exact(
-                model,
-                tokens_before,
-                [pair_ids[index] for index in selected],
-                slaves[selected],
-                seg_targets[selected],
-                pose_targets[selected],
-                segnet,
-                posenet,
-                pose_output,
-                args.eval_batch_size,
-                device,
-            )
-            rate_before_bits, rate_tables = hpac_oracle.affected_bits(
-                current_tokens,
-                selected,
-                return_cost_tables=True,
-            )
+            exact_before = aggregate_exact_metrics([
+                exact_frame_metrics[index] for index in selected
+            ])
+            if len(selected) == 1:
+                rate_before_bits, rate_tables, rate_before_frames = (
+                    hpac_oracle.affected_frame_bits(
+                        current_tokens,
+                        selected,
+                        return_cost_tables=True,
+                        cached_frame_bits=current_rate_frame_bits,
+                    )
+                )
+            else:
+                if len({pair_ids[index] % 2 for index in selected}) != 1:
+                    raise ValueError("checkerboard batch crossed temporal colors")
+                rate_before_bits, rate_tables, rate_before_frames = (
+                    hpac_oracle.proposal_batch(
+                        current_tokens,
+                        selected,
+                        cached_frame_bits=current_rate_frame_bits,
+                    )
+                )
+            current_rate_frame_bits.update(rate_before_frames)
             category_rate_bits = torch.stack(
                 [rate_tables[index] for index in selected]
             )
-            current_for_rate = tokens_before.long().unsqueeze(-1)
+            current_for_rate = tokens_before.to(device).long().unsqueeze(-1)
             rate_proxy_value = float(
                 category_rate_bits.gather(-1, current_for_rate).mean()
-            )
-            rate_only = args.proposal_mode == "rate" or (
-                args.proposal_mode == "alternating" and step % 2 == 0
             )
             moves, gradient_stats = rank_token_moves(
                 logits,
@@ -807,17 +957,32 @@ def main() -> None:
                 rate_only=rate_only,
             )
             proposed_moves += len(moves)
-            key_before = exact_before[
-                "semantic_pose_score_without_rate"
-            ] + projected_hpac_rate_score(
-                rate_before_bits, len(selected)
+            if global_score_gate:
+                perception_before = semantic_pose_score(
+                    current_global_seg, current_global_pose
+                )
+                rate_scale_frames = N_TOTAL_PAIRS
+            else:
+                perception_before = exact_before[
+                    "semantic_pose_score_without_rate"
+                ]
+                rate_scale_frames = len(selected)
+            key_before = perception_before + projected_hpac_rate_score(
+                rate_before_bits, rate_scale_frames
             )
             initial_payload = {
                 "exact": exact_before,
                 "rate_bits": rate_before_bits,
+                "frame_bits": rate_before_frames,
+                "perception_score": perception_before,
+                "global_seg": current_global_seg,
+                "global_pose": current_global_pose,
             }
 
             def evaluate_candidate(candidate_tokens):
+                nonlocal localized_rate_rechecks
+                nonlocal localized_current_patches
+                nonlocal localized_next_patches
                 exact_candidate = evaluate_exact(
                     model,
                     candidate_tokens,
@@ -830,45 +995,190 @@ def main() -> None:
                     pose_output,
                     args.eval_batch_size,
                     device,
+                    return_per_frame=True,
                 )
-                overrides = {
-                    selected[batch_index]: candidate_tokens[batch_index]
-                    for batch_index in range(len(selected))
-                }
-                rate_candidate_bits, _ = hpac_oracle.affected_bits(
-                    current_tokens,
-                    selected,
-                    overrides=overrides,
-                )
-                unconstrained_key = exact_candidate[
-                    "semantic_pose_score_without_rate"
-                ] + projected_hpac_rate_score(
-                    rate_candidate_bits, len(selected)
+                candidate_per_frame = exact_candidate.pop("per_frame")
+                localized_delta_bits = 0.0
+                localized_frame_deltas: dict[int, float] = {}
+                individual_rate_deltas: dict[int, dict[str, object]] = {}
+                for batch_index, parameter_index in enumerate(selected):
+                    if torch.equal(
+                        candidate_tokens[batch_index], tokens_before[batch_index]
+                    ):
+                        continue
+                    delta_bits, frame_deltas, locality = (
+                        hpac_oracle.localized_move_delta(
+                            current_tokens,
+                            parameter_index,
+                            candidate_tokens[batch_index],
+                        )
+                    )
+                    localized_delta_bits += delta_bits
+                    individual_rate_deltas[batch_index] = {
+                        "bits": delta_bits,
+                        "frame_deltas": frame_deltas,
+                    }
+                    for global_index, delta in frame_deltas.items():
+                        localized_frame_deltas[global_index] = (
+                            localized_frame_deltas.get(global_index, 0.0) + delta
+                        )
+                    localized_rate_rechecks += 1
+                    localized_current_patches += locality["current_patches"]
+                    localized_next_patches += locality["next_patches"]
+                rate_candidate_bits = rate_before_bits + localized_delta_bits
+                rate_candidate_frames = dict(rate_before_frames)
+                for global_index, delta in localized_frame_deltas.items():
+                    rate_candidate_frames[global_index] += delta
+                if global_score_gate:
+                    candidate_global_seg, candidate_global_pose, candidate_perception = (
+                        replace_global_perception(
+                            current_global_seg,
+                            current_global_pose,
+                            exact_before,
+                            exact_candidate,
+                            len(selected),
+                        )
+                    )
+                else:
+                    candidate_global_seg = current_global_seg
+                    candidate_global_pose = current_global_pose
+                    candidate_perception = exact_candidate[
+                        "semantic_pose_score_without_rate"
+                    ]
+                unconstrained_key = candidate_perception + projected_hpac_rate_score(
+                    rate_candidate_bits, rate_scale_frames
                 )
                 # A direct low-surprise symbol can still make later HPAC
                 # contexts more expensive.  Pure rate mode requires the whole
                 # affected stream to shrink before considering total score.
                 rate_constraint_satisfied = (
-                    args.proposal_mode != "rate"
+                    not rate_only
                     or rate_candidate_bits < rate_before_bits
                 )
                 return (
                     unconstrained_key if rate_constraint_satisfied else math.inf
                 ), {
                     "exact": exact_candidate,
+                    "per_frame": candidate_per_frame,
+                    "individual_rate_deltas": individual_rate_deltas,
                     "rate_bits": rate_candidate_bits,
+                    "frame_bits": rate_candidate_frames,
+                    "perception_score": candidate_perception,
+                    "global_seg": candidate_global_seg,
+                    "global_pose": candidate_global_pose,
                     "unconstrained_key": unconstrained_key,
                     "rate_constraint_satisfied": rate_constraint_satisfied,
                 }
 
-            result = accept_with_backtracking(
-                tokens_before,
-                moves,
-                key_before,
-                initial_payload,
-                evaluate_candidate,
-                args.backtrack_max_evals,
-            )
+            if checkerboard_batch and len(selected) > 1:
+                all_candidate_tokens = apply_token_moves(tokens_before, moves)
+                _, batch_payload = evaluate_candidate(all_candidate_tokens)
+                move_by_batch = {move.batch_index: move for move in moves}
+                working_tokens = tokens_before.clone()
+                accepted_moves = []
+                accepted_per_frame = [
+                    exact_frame_metrics[index] for index in selected
+                ]
+                accepted_frame_bits = dict(rate_before_frames)
+                accepted_rate_delta = 0.0
+                lossy_accepted = 0
+                trial_global_seg = current_global_seg
+                trial_global_pose = current_global_pose
+                for batch_index, parameter_index in enumerate(selected):
+                    move = move_by_batch.get(batch_index)
+                    if move is None:
+                        continue
+                    rate_details = batch_payload[
+                        "individual_rate_deltas"
+                    ][batch_index]
+                    rate_delta = float(rate_details["bits"])
+                    exact_after = batch_payload["per_frame"][batch_index]
+                    exact_frame_before = exact_frame_metrics[parameter_index]
+                    if global_score_gate:
+                        perception_before_move = semantic_pose_score(
+                            trial_global_seg, trial_global_pose
+                        )
+                        (
+                            candidate_global_seg,
+                            candidate_global_pose,
+                            perception_after_move,
+                        ) = replace_global_perception(
+                            trial_global_seg,
+                            trial_global_pose,
+                            exact_frame_before,
+                            exact_after,
+                            1,
+                        )
+                        score_delta = (
+                            perception_after_move - perception_before_move
+                            + projected_hpac_rate_score(
+                                rate_delta, N_TOTAL_PAIRS
+                            )
+                        )
+                    else:
+                        perception_before_move = exact_frame_before[
+                            "semantic_pose_score_without_rate"
+                        ]
+                        perception_after_move = exact_after[
+                            "semantic_pose_score_without_rate"
+                        ]
+                        score_delta = (
+                            perception_after_move - perception_before_move
+                            + projected_hpac_rate_score(rate_delta, 1)
+                        )
+                    if rate_delta >= 0 or score_delta >= 0:
+                        continue
+
+                    working_tokens[batch_index] = all_candidate_tokens[batch_index]
+                    accepted_moves.append(move)
+                    accepted_per_frame[batch_index] = exact_after
+                    accepted_rate_delta += rate_delta
+                    if perception_after_move > perception_before_move:
+                        lossy_accepted += 1
+                    for global_index, delta in rate_details[
+                        "frame_deltas"
+                    ].items():
+                        accepted_frame_bits[global_index] += delta
+                    if global_score_gate:
+                        trial_global_seg = candidate_global_seg
+                        trial_global_pose = candidate_global_pose
+
+                accepted_exact = aggregate_exact_metrics(accepted_per_frame)
+                accepted_perception = (
+                    semantic_pose_score(trial_global_seg, trial_global_pose)
+                    if global_score_gate
+                    else accepted_exact["semantic_pose_score_without_rate"]
+                )
+                accepted_rate_bits = rate_before_bits + accepted_rate_delta
+                accepted_key = accepted_perception + projected_hpac_rate_score(
+                    accepted_rate_bits, rate_scale_frames
+                )
+                result = BacktrackResult(
+                    tokens=working_tokens,
+                    key=accepted_key,
+                    payload={
+                        "exact": accepted_exact,
+                        "per_frame": accepted_per_frame,
+                        "rate_bits": accepted_rate_bits,
+                        "frame_bits": accepted_frame_bits,
+                        "perception_score": accepted_perception,
+                        "global_seg": trial_global_seg,
+                        "global_pose": trial_global_pose,
+                        "lossy_accepted_count": lossy_accepted,
+                    },
+                    accepted_moves=accepted_moves,
+                    evaluations=1,
+                    rejected_batches=int(len(accepted_moves) != len(moves)),
+                )
+            else:
+                result = accept_with_backtracking(
+                    tokens_before,
+                    moves,
+                    key_before,
+                    initial_payload,
+                    evaluate_candidate,
+                    args.backtrack_max_evals,
+                )
             accepted_count = len(result.accepted_moves)
             rejected_count = len(moves) - accepted_count
             accepted_proposals += accepted_count
@@ -881,8 +1191,7 @@ def main() -> None:
             proposal_accepted = bool(accepted_count)
             if proposal_accepted:
                 step_perception_delta = (
-                    result.payload["exact"]["semantic_pose_score_without_rate"]
-                    - exact_before["semantic_pose_score_without_rate"]
+                    result.payload["perception_score"] - perception_before
                 )
                 step_hpac_delta_bits = (
                     float(result.payload["rate_bits"]) - rate_before_bits
@@ -890,10 +1199,20 @@ def main() -> None:
                 step_total_delta = result.key - key_before
                 if step_hpac_delta_bits < 0:
                     accepted_rate_saving_proposals += accepted_count
-                    if step_perception_delta > 0:
-                        accepted_lossy_rate_proposals += accepted_count
+                    accepted_lossy_rate_proposals += result.payload.get(
+                        "lossy_accepted_count",
+                        accepted_count if step_perception_delta > 0 else 0,
+                    )
                 current_tokens[selected] = result.tokens
                 current_hpac_delta_bits += step_hpac_delta_bits
+                for batch_index, parameter_index in enumerate(selected):
+                    exact_frame_metrics[parameter_index] = result.payload[
+                        "per_frame"
+                    ][batch_index]
+                current_rate_frame_bits.update(result.payload["frame_bits"])
+                if global_score_gate:
+                    current_global_seg = result.payload["global_seg"]
+                    current_global_pose = result.payload["global_pose"]
         else:
             if args.accept_exact:
                 selected_index = selected[0]
@@ -976,6 +1295,9 @@ def main() -> None:
                 args.eval_batch_size,
                 device,
             )
+            if global_score_gate:
+                current_global_seg = float(exact["segnet_distortion"])
+                current_global_pose = float(exact["posenet_distortion"])
             rate = token_rate_statistics(learned_tokens)
             changes = int((learned_tokens != baseline_tokens).sum())
             if args.rate_model == "hpac":
@@ -1128,6 +1450,16 @@ def main() -> None:
         "hpac_ideal_delta_bits": best_hpac_delta_bits,
         "hpac_rate_score_delta": hpac_rate_score_delta,
         "active_rate_model": args.rate_model,
+        "score_gate": (
+            "global_official" if global_score_gate else "local_projected"
+        ),
+        "attempt_history": (
+            "token_category" if args.rate_model == "hpac" else "pixel"
+        ),
+        "cached_hpac_frame_totals": len(current_rate_frame_bits),
+        "localized_rate_rechecks": localized_rate_rechecks,
+        "localized_current_patches": localized_current_patches,
+        "localized_next_patches": localized_next_patches,
         "proxy_total_score_delta_after_int4": (
             learned_metrics_quantized["semantic_pose_score_without_rate"]
             - baseline_metrics["semantic_pose_score_without_rate"]

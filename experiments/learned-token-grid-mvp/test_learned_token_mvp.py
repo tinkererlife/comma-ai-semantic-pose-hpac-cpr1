@@ -20,6 +20,8 @@ from learned_token_mvp import (
     mask_token_gradients,
     projected_lzma_rate_score,
     propose_token_changes,
+    replace_global_perception,
+    semantic_pose_score,
     straight_through_one_hot,
     token_rate_statistics,
 )
@@ -119,6 +121,23 @@ def test_hpac_probability_bits_match_uniform_softmax() -> None:
     assert torch.allclose(bits, torch.full_like(bits, np.log2(5)), atol=1e-6)
 
 
+def test_hpac_probability_bits_match_numpy_codec_math() -> None:
+    logits = torch.tensor([
+        [1.31, -2.19, 0.06, 4.0, -0.44],
+        [-10.0, 2.24, 2.26, 1.0, 0.0],
+    ])
+    codes = np.clip(np.rint(logits.numpy() * 8), -32768, 32767).astype(np.int16)
+    reference_logits = codes.astype(np.float64) / 8.0
+    reference_logits -= reference_logits.max(axis=1, keepdims=True)
+    probabilities = np.exp(reference_logits)
+    probabilities /= probabilities.sum(axis=1, keepdims=True)
+    probabilities = probabilities.astype(np.float32)
+    expected = -np.log2(probabilities.astype(np.float64)).astype(np.float32)
+    actual = quantized_probability_bits(logits)
+    assert actual.device == logits.device
+    assert torch.equal(actual, torch.from_numpy(expected))
+
+
 def test_projected_hpac_bits_use_official_rate_coefficient() -> None:
     assert projected_hpac_rate_score(8 * 191_052, 600) == (
         25.0 * 191_052 / 37_545_489
@@ -152,6 +171,51 @@ def test_rate_only_moves_are_spatially_separated() -> None:
         (3, 3, 1),
     ]
     assert stats["proposal_mode"] == "rate"
+
+
+def test_rate_only_retries_another_category_without_a_gradient() -> None:
+    tokens = torch.zeros((1, 1, 1), dtype=torch.long)
+    logits = local_logits_from_tokens(tokens, 0.25, torch.device("cpu")).detach()
+    costs = torch.tensor([[[[5.0, 1.0, 2.0, 3.0, 4.0]]]])
+    attempted = [torch.zeros((1, 1), dtype=torch.uint8)]
+
+    first, _ = rank_token_moves(
+        logits,
+        tokens,
+        [0],
+        1,
+        attempted_masks=attempted,
+        category_rate_bits=costs,
+        rate_score_per_bit=1.0,
+        rate_only=True,
+    )
+    second, _ = rank_token_moves(
+        logits,
+        tokens,
+        [0],
+        1,
+        attempted_masks=attempted,
+        category_rate_bits=costs,
+        rate_score_per_bit=1.0,
+        rate_only=True,
+    )
+    assert [first[0].after, second[0].after] == [1, 2]
+    assert int(attempted[0][0, 0]) == (1 << 1) | (1 << 2)
+
+
+def test_global_perception_replaces_one_frame_before_pose_sqrt() -> None:
+    before = {"segnet_distortion": 0.01, "posenet_distortion": 0.01}
+    after = {"segnet_distortion": 0.02, "posenet_distortion": 0.04}
+    seg, pose, score = replace_global_perception(
+        global_seg=0.03,
+        global_pose=0.04,
+        local_before=before,
+        local_after=after,
+        changed_frames=1,
+    )
+    assert np.isclose(seg, 0.03 + 0.01 / 600)
+    assert np.isclose(pose, 0.04 + 0.03 / 600)
+    assert np.isclose(score, semantic_pose_score(seg, pose))
 
 
 def test_backtracking_finds_useful_subset_of_rejected_batch() -> None:

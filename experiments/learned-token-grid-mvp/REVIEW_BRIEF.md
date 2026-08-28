@@ -56,8 +56,9 @@ semantic renderer and token stream while preserving the carrier and HPAC bytes.
 | Token grid only, 159 flips | 0.1706872406 | 191,516 B | -0.8447% |
 | Tokens + best full-600 int4 renderer | 0.1702539624 | 191,504 B | -1.0964% |
 | Strict full-600 rate-first pass | 0.1700018955 | 191,256 B | -1.2428% |
+| Four category-aware checkerboard sweeps | 0.1692241979 | 191,084 B | -1.6946% |
 
-The final score decomposition is important:
+The first strict pass's score decomposition was important:
 
 ```text
                              #130          final          change
@@ -73,6 +74,13 @@ stream shrank by 248 bytes versus the renderer-hardened artifact.  Although the
 40 deliberately lossy moves exist, the other 71 moves improved perception
 enough that the aggregate final artifact is a Pareto improvement over the prior
 artifact: both its rate and distortion contribution are lower.
+
+The category-aware follow-up started from that artifact, tested 2,400 further
+candidates and accepted 175, including 39 perception-for-rate trades.  Its four
+cumulative projected score deltas were `-0.0000403`, `-0.0002515`,
+`-0.0005434`, and `-0.0007829`; there was no clear saturation after four
+sweeps.  The real token stream shrank by 172 bytes and the official full-score
+improvement was `-0.0007777`, only `0.0000052` away from the projection.
 
 ## What happened in the smaller experiments
 
@@ -94,17 +102,39 @@ artifact: both its rate and distortion contribution are lower.
   accepted 111 of 600, including 40 such trades, and survived real encoding and
   official evaluation.
 
+## Exact-search scalability follow-up
+
+The next iteration fixes the full-600 pose gate (frame contributions are now
+replaced in the global mean before the nonlinear square root), remembers
+attempted token categories rather than blacklisting a pixel, and keeps HPAC
+probability math on the GPU.  Its localized HPAC recomputation was checked
+against full-frame recomputation on ten random and boundary edits: the maximum
+ideal-bit difference was `5.4e-13`, with a measured mean rate-recheck speedup of
+`6.63x`.
+
+The same probe disproved the proposed renderer crop optimization.  Four spatial
+GroupNorm layers make a one-token edit affect the renderer globally; after
+camera rounding, 1,932--12,439 pixels changed in the sampled frames.  We therefore
+batch temporally independent even/odd frames but retain full renderer,
+SegNet and PoseNet evaluation.  A 32-frame decision-equivalent control fell
+from 168.9 s in the original path to 73.7 s on T4.  Increasing the batch from
+4 to 16 reduced that only to 68.8 s because exact localized HPAC rechecks remain
+serial.  An A100-SXM4 run with TF32 disabled reproduced the same accepted move
+and ideal-bit delta in 44.0 s (`1.56x` faster than T4 batch 16); leaving TF32 on
+changed the accept/reject decisions and is not used.
+
 ## Why this is still only a conservative MVP
 
 The grid contains 117,964,800 token positions, but the final artifact differs
-from #130 in only 142.  We did not perform a global joint optimization over all
-tokens and the decoder.  The rate-first pass tried only one candidate per frame,
-or 600 out of roughly 472 million possible single-token category changes.  In
-particular, we did not implement:
+from #130 in only 296.  We did not perform a global joint optimization over all
+tokens and the decoder.  The two rate-first phases tried only 3,000 out of
+roughly 472 million possible single-token category changes.  In particular, we
+did not implement:
 
 - a persistent freely learned grid over all 600 frames with a scalable discrete
   optimizer;
-- second/third/fourth category candidates or multiple rate-first passes;
+- persistent search-state checkpoints for continuing beyond four new sweeps
+  without revisiting prior rejected candidates;
 - region, contour, block or temporal-tube moves instead of isolated pixels;
 - exact final arithmetic-coded byte length inside every acceptance decision
   (the oracle matches deployed HPAC probabilities and ideal bits);
@@ -122,8 +152,8 @@ Please focus on missed algorithmic potential rather than style:
    without a scale, indexing, context or projection error?
 2. HPAC ideal bits predicted about 449 saved bytes while the real range coder
    saved 248.  Can acceptance cheaply target actual coder bytes more closely?
-3. Does permanently blacklisting an attempted pixel wrongly prevent trying its
-   other three token categories later under a changed context?
+3. Can the still-serial exact localized HPAC rechecks be vectorized across
+   same-parity frames without losing bit-identical decisions?
 4. What is the simplest scalable rate-first search over structural moves:
    contours, connected regions, blocks, or temporal tubes?
 5. Should optimization alternate between (A) metric-neutral byte removal and
