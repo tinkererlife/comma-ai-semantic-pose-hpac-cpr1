@@ -82,6 +82,21 @@ def parse_args() -> argparse.Namespace:
         help="Discrete trust region: only these most promising pixels update.",
     )
     parser.add_argument(
+        "--proposal-candidates-per-frame",
+        type=int,
+        default=1,
+        help=(
+            "Independent token alternatives evaluated exactly per checkerboard "
+            "frame; at most one can be accepted."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-batch-size",
+        type=int,
+        default=60,
+        help="Maximum independent Top-K alternatives in one localized HPAC batch.",
+    )
+    parser.add_argument(
         "--proposal-min-distance",
         type=int,
         default=0,
@@ -118,6 +133,11 @@ def parse_args() -> argparse.Namespace:
         "--hpac-checkpoint",
         type=Path,
         help="Defaults to the frozen #130 self-compressing IntegerHPAC.",
+    )
+    parser.add_argument(
+        "--initial-attempts",
+        type=Path,
+        help="Optional compressed category-attempt history from an earlier run.",
     )
     parser.add_argument("--finetune-renderer", action="store_true")
     parser.add_argument("--renderer-lr", type=float, default=2e-6)
@@ -347,6 +367,27 @@ def token_rate_statistics(tokens: torch.Tensor) -> dict[str, object]:
         "histogram": histogram.tolist(),
         **hard_conditional_entropy(array),
     }
+
+
+def pack_attempt_history(attempted_masks: list[torch.Tensor]) -> bytes:
+    """Compress the per-pixel five-bit category history for exact resume."""
+    array = torch.stack(attempted_masks).to(torch.uint8).numpy()
+    return zlib.compress(array.tobytes(order="C"), level=1)
+
+
+def unpack_attempt_history(
+    blob: bytes, frames: int, height: int = EVAL_H, width: int = EVAL_W
+) -> list[torch.Tensor]:
+    raw = zlib.decompress(blob)
+    expected = frames * height * width
+    if len(raw) != expected:
+        raise ValueError(
+            f"attempt history has {len(raw)} entries, expected {expected}"
+        )
+    array = np.frombuffer(raw, dtype=np.uint8).copy().reshape(frames, height, width)
+    if int(array.max(initial=0)) >= 1 << N_TOKENS:
+        raise ValueError("attempt history contains bits outside the token alphabet")
+    return [torch.from_numpy(frame) for frame in array]
 
 
 def chunks(values: list[int], size: int) -> Iterable[list[int]]:
@@ -647,6 +688,10 @@ def main() -> None:
         raise ValueError("margin and temperatures must be positive")
     if args.max_token_pixels_per_frame < 1:
         raise ValueError("--max-token-pixels-per-frame must be positive")
+    if args.proposal_candidates_per_frame < 1:
+        raise ValueError("--proposal-candidates-per-frame must be positive")
+    if args.candidate_batch_size < 1:
+        raise ValueError("--candidate-batch-size must be positive")
     if args.proposal_min_distance < 0:
         raise ValueError("--proposal-min-distance cannot be negative")
     if args.backtrack_max_evals < 1:
@@ -671,6 +716,10 @@ def main() -> None:
         ]
         if any(count % args.batch_size for count in color_counts if count):
             raise ValueError("batch size must divide each checkerboard color")
+    elif args.proposal_candidates_per_frame != 1:
+        raise ValueError(
+            "Top-K alternatives require exact HPAC checkerboard batching"
+        )
     if args.rate_model == "hpac" and not args.accept_exact:
         raise ValueError("the HPAC rate oracle requires --accept-exact")
     if args.finetune_renderer:
@@ -756,6 +805,8 @@ def main() -> None:
             "checkpoint": str(hpac_checkpoint),
             "proposal_mode": args.proposal_mode,
             "proposal_pixels_per_frame": args.max_token_pixels_per_frame,
+            "proposal_candidates_per_frame": args.proposal_candidates_per_frame,
+            "candidate_batch_size": args.candidate_batch_size,
             "proposal_min_distance": args.proposal_min_distance,
             "backtrack_max_evals": args.backtrack_max_evals,
             "score_gate": (
@@ -828,6 +879,12 @@ def main() -> None:
         )
         for _ in range(args.pairs)
     ]
+    if args.initial_attempts:
+        if args.rate_model != "hpac":
+            raise ValueError("category attempt history is only supported with HPAC")
+        attempted_masks = unpack_attempt_history(
+            args.initial_attempts.read_bytes(), args.pairs
+        )
     global_score_gate = args.rate_model == "hpac" and args.pairs == N_TOTAL_PAIRS
     current_global_seg = float(baseline_metrics["segnet_distortion"])
     current_global_pose = float(baseline_metrics["posenet_distortion"])
@@ -843,6 +900,7 @@ def main() -> None:
     localized_rate_rechecks = 0
     localized_current_patches = 0
     localized_next_patches = 0
+    topk_candidate_evaluations = 0
     started = time.time()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -968,16 +1026,24 @@ def main() -> None:
             rate_proxy_value = float(
                 category_rate_bits.gather(-1, current_for_rate).mean()
             )
+            independent_topk = (
+                checkerboard_batch and args.proposal_candidates_per_frame > 1
+            )
             moves, gradient_stats = rank_token_moves(
                 logits,
                 tokens_before,
                 selected,
-                args.max_token_pixels_per_frame,
+                (
+                    args.proposal_candidates_per_frame
+                    if independent_topk
+                    else args.max_token_pixels_per_frame
+                ),
                 attempted_masks,
                 category_rate_bits=category_rate_bits,
                 rate_score_per_bit=projected_hpac_rate_score(1.0, len(selected)),
                 minimum_distance=args.proposal_min_distance,
                 rate_only=rate_only,
+                independent_alternatives=independent_topk,
             )
             proposed_moves += len(moves)
             if global_score_gate:
@@ -1111,7 +1177,169 @@ def main() -> None:
                     "rate_constraint_satisfied": rate_constraint_satisfied,
                 }
 
-            if checkerboard_batch and len(selected) > 1:
+            if independent_topk:
+                candidate_results: dict[
+                    int, list[tuple[object, dict[str, float], float, dict[int, float]]]
+                ] = {}
+                for move_chunk in chunks(moves, args.candidate_batch_size):
+                    candidate_frames = []
+                    candidate_indices = []
+                    candidate_pair_ids = []
+                    for move in move_chunk:
+                        candidate = tokens_before[move.batch_index].clone()
+                        if int(candidate[move.row, move.col]) != move.before:
+                            raise ValueError("Top-K move no longer matches source token")
+                        candidate[move.row, move.col] = move.after
+                        candidate_frames.append(candidate)
+                        parameter_index = selected[move.batch_index]
+                        candidate_indices.append(parameter_index)
+                        candidate_pair_ids.append(pair_ids[parameter_index])
+                    candidate_tensor = torch.stack(candidate_frames)
+                    exact_candidates = evaluate_exact(
+                        model,
+                        candidate_tensor,
+                        candidate_pair_ids,
+                        slaves[candidate_indices],
+                        seg_targets[candidate_indices],
+                        pose_targets[candidate_indices],
+                        segnet,
+                        posenet,
+                        pose_output,
+                        args.eval_batch_size,
+                        device,
+                        return_per_frame=True,
+                    )["per_frame"]
+                    localized_results = hpac_oracle.localized_move_delta_batch(
+                        current_tokens,
+                        candidate_indices,
+                        candidate_tensor,
+                    )
+                    for move, exact_after, localized_result in zip(
+                        move_chunk, exact_candidates, localized_results
+                    ):
+                        rate_delta, frame_deltas, locality = localized_result
+                        candidate_results.setdefault(move.batch_index, []).append((
+                            move, exact_after, rate_delta, frame_deltas
+                        ))
+                        localized_rate_rechecks += 1
+                        localized_current_patches += locality["current_patches"]
+                        localized_next_patches += locality["next_patches"]
+                        topk_candidate_evaluations += 1
+
+                working_tokens = tokens_before.clone()
+                accepted_moves = []
+                accepted_per_frame = [
+                    exact_frame_metrics[index] for index in selected
+                ]
+                accepted_frame_bits = dict(rate_before_frames)
+                accepted_rate_delta = 0.0
+                lossy_accepted = 0
+                trial_global_seg = current_global_seg
+                trial_global_pose = current_global_pose
+                for batch_index, parameter_index in enumerate(selected):
+                    exact_frame_before = exact_frame_metrics[parameter_index]
+                    best_candidate = None
+                    best_score_delta = 0.0
+                    for move, exact_after, rate_delta, frame_deltas in (
+                        candidate_results.get(batch_index, [])
+                    ):
+                        if rate_only and rate_delta >= 0:
+                            continue
+                        if global_score_gate:
+                            perception_before_move = semantic_pose_score(
+                                trial_global_seg, trial_global_pose
+                            )
+                            candidate_seg, candidate_pose, perception_after_move = (
+                                replace_global_perception(
+                                    trial_global_seg,
+                                    trial_global_pose,
+                                    exact_frame_before,
+                                    exact_after,
+                                    1,
+                                )
+                            )
+                            score_delta = (
+                                perception_after_move - perception_before_move
+                                + projected_hpac_rate_score(
+                                    rate_delta, N_TOTAL_PAIRS
+                                )
+                            )
+                        else:
+                            candidate_seg = trial_global_seg
+                            candidate_pose = trial_global_pose
+                            perception_before_move = exact_frame_before[
+                                "semantic_pose_score_without_rate"
+                            ]
+                            perception_after_move = exact_after[
+                                "semantic_pose_score_without_rate"
+                            ]
+                            score_delta = (
+                                perception_after_move - perception_before_move
+                                + projected_hpac_rate_score(rate_delta, 1)
+                            )
+                        if score_delta < best_score_delta:
+                            best_score_delta = score_delta
+                            best_candidate = (
+                                move,
+                                exact_after,
+                                rate_delta,
+                                frame_deltas,
+                                candidate_seg,
+                                candidate_pose,
+                                perception_before_move,
+                                perception_after_move,
+                            )
+                    if best_candidate is None:
+                        continue
+                    (
+                        move,
+                        exact_after,
+                        rate_delta,
+                        frame_deltas,
+                        candidate_seg,
+                        candidate_pose,
+                        perception_before_move,
+                        perception_after_move,
+                    ) = best_candidate
+                    working_tokens[batch_index, move.row, move.col] = move.after
+                    accepted_moves.append(move)
+                    accepted_per_frame[batch_index] = exact_after
+                    accepted_rate_delta += rate_delta
+                    if perception_after_move > perception_before_move:
+                        lossy_accepted += 1
+                    for global_index, delta in frame_deltas.items():
+                        accepted_frame_bits[global_index] += delta
+                    if global_score_gate:
+                        trial_global_seg = candidate_seg
+                        trial_global_pose = candidate_pose
+
+                accepted_exact = aggregate_exact_metrics(accepted_per_frame)
+                accepted_perception = (
+                    semantic_pose_score(trial_global_seg, trial_global_pose)
+                    if global_score_gate
+                    else accepted_exact["semantic_pose_score_without_rate"]
+                )
+                accepted_rate_bits = rate_before_bits + accepted_rate_delta
+                result = BacktrackResult(
+                    tokens=working_tokens,
+                    key=accepted_perception + projected_hpac_rate_score(
+                        accepted_rate_bits, rate_scale_frames
+                    ),
+                    payload={
+                        "exact": accepted_exact,
+                        "per_frame": accepted_per_frame,
+                        "rate_bits": accepted_rate_bits,
+                        "frame_bits": accepted_frame_bits,
+                        "perception_score": accepted_perception,
+                        "global_seg": trial_global_seg,
+                        "global_pose": trial_global_pose,
+                        "lossy_accepted_count": lossy_accepted,
+                    },
+                    accepted_moves=accepted_moves,
+                    evaluations=len(moves),
+                    rejected_batches=int(len(accepted_moves) != len(moves)),
+                )
+            elif checkerboard_batch and len(selected) > 1:
                 all_candidate_tokens = apply_token_moves(tokens_before, moves)
                 _, batch_payload = evaluate_candidate(all_candidate_tokens)
                 move_by_batch = {move.batch_index: move for move in moves}
@@ -1414,13 +1642,18 @@ def main() -> None:
             (args.out_dir / "checkpoint_tokens.u8").write_bytes(
                 learned_tokens.numpy().astype(np.uint8, copy=False).tobytes()
             )
+            (args.out_dir / "checkpoint_attempts.u8.zlib").write_bytes(
+                pack_attempt_history(attempted_masks)
+            )
             (args.out_dir / "checkpoint.json").write_text(json.dumps({
-                "schema_version": 1,
+                "schema_version": 2,
                 "step": step,
                 "current_hpac_delta_bits": current_hpac_delta_bits,
                 "accepted_proposals": accepted_proposals,
                 "accepted_lossy_rate_proposals": accepted_lossy_rate_proposals,
                 "proposed_moves": proposed_moves,
+                "topk_candidate_evaluations": topk_candidate_evaluations,
+                "attempt_history_file": "checkpoint_attempts.u8.zlib",
                 "last_record": record,
             }, indent=2) + "\n")
             print(json.dumps({"stage": "train", **record}), flush=True)
@@ -1523,6 +1756,7 @@ def main() -> None:
         "localized_rate_rechecks": localized_rate_rechecks,
         "localized_current_patches": localized_current_patches,
         "localized_next_patches": localized_next_patches,
+        "topk_candidate_evaluations": topk_candidate_evaluations,
         "proxy_total_score_delta_after_int4": (
             learned_metrics_quantized["semantic_pose_score_without_rate"]
             - baseline_metrics["semantic_pose_score_without_rate"]

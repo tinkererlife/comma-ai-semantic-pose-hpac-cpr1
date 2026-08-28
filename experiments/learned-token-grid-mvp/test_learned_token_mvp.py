@@ -19,11 +19,13 @@ from learned_token_mvp import (
     local_logits_from_tokens,
     mask_token_gradients,
     projected_lzma_rate_score,
+    pack_attempt_history,
     propose_token_changes,
     replace_global_perception,
     semantic_pose_score,
     straight_through_one_hot,
     token_rate_statistics,
+    unpack_attempt_history,
 )
 
 
@@ -201,6 +203,44 @@ def test_rate_only_retries_another_category_without_a_gradient() -> None:
     )
     assert [first[0].after, second[0].after] == [1, 2]
     assert int(attempted[0][0, 0]) == (1 << 1) | (1 << 2)
+
+
+def test_topk_ranks_independent_pixel_category_alternatives() -> None:
+    tokens = torch.zeros((1, 1, 2), dtype=torch.long)
+    logits = local_logits_from_tokens(tokens, 0.25, torch.device("cpu")).detach()
+    costs = torch.tensor([[[[5.0, 0.0, 1.0, 8.0, 9.0],
+                            [5.0, 2.0, 3.0, 8.0, 9.0]]]])
+    attempted = [torch.zeros((1, 2), dtype=torch.uint8)]
+    moves, stats = rank_token_moves(
+        logits,
+        tokens,
+        [0],
+        3,
+        attempted_masks=attempted,
+        category_rate_bits=costs,
+        rate_score_per_bit=1.0,
+        rate_only=True,
+        independent_alternatives=True,
+    )
+    assert [(move.row, move.col, move.after) for move in moves] == [
+        (0, 0, 1),
+        (0, 0, 2),
+        (0, 1, 1),
+    ]
+    assert int(attempted[0][0, 0]) == (1 << 1) | (1 << 2)
+    assert int(attempted[0][0, 1]) == 1 << 1
+    assert stats["independent_alternatives"] is True
+
+
+def test_attempt_history_roundtrip() -> None:
+    attempted = [
+        torch.tensor([[0, 1], [2, 16]], dtype=torch.uint8),
+        torch.tensor([[4, 8], [3, 0]], dtype=torch.uint8),
+    ]
+    restored = unpack_attempt_history(
+        pack_attempt_history(attempted), frames=2, height=2, width=2
+    )
+    assert all(torch.equal(before, after) for before, after in zip(attempted, restored))
 
 
 def test_global_perception_replaces_one_frame_before_pose_sqrt() -> None:

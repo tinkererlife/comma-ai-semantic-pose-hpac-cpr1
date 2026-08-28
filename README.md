@@ -2,8 +2,8 @@
 
 This is the public reproducibility repository for
 [`semantic-pose-HPAC_CPR1`](https://github.com/commaai/comma_video_compression_challenge/pull/130).
-This fork learns a hard five-symbol token grid, hardens the int4 renderer, then searches exact rate-distortion token moves with vectorized HPAC rechecks.
-Its 190,664-byte artifact scores 0.167707 vs. #130's 0.172141 (2.576% lower); localized rechecks are 8.2x faster and four full sweeps are 7.3x faster.
+This fork learns a hard five-symbol token grid, then searches exact rate-distortion moves with vectorized HPAC rechecks and independent Top-K alternatives.
+Its artifact scores 0.167707 vs. #130's 0.172141; K=8 found 38 further moves but only a projected 0.000041 gain, pointing next to structural moves.
 It preserves two separate guarantees:
 
 1. a byte-exact rebuild of the frozen 191,052-byte CPR1 submission artifact;

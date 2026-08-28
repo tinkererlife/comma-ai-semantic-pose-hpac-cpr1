@@ -853,6 +853,7 @@ def rank_token_moves(
     rate_score_per_bit: float = 0.0,
     minimum_distance: int = 0,
     rate_only: bool = False,
+    independent_alternatives: bool = False,
 ) -> tuple[list[TokenMove], dict[str, float | int | str]]:
     """Rank hard moves using perception gradients plus deployed-HPAC surprise."""
     if logits.grad is None and not rate_only:
@@ -911,6 +912,51 @@ def rank_token_moves(
     moves: list[TokenMove] = []
     positive_candidates = 0
     for batch_index, parameter_index in enumerate(selected):
+        if independent_alternatives:
+            category_benefit = (
+                current_objective[batch_index].unsqueeze(-1)
+                - objective[batch_index]
+            ).masked_fill(forbidden[batch_index], -torch.inf)
+            flat_benefit = category_benefit.reshape(-1)
+            positive = flat_benefit > 0
+            positive_count = int(positive.sum())
+            positive_candidates += positive_count
+            if not positive_count:
+                continue
+            keep_count = min(positive_count, max_pixels_per_frame)
+            ranked = flat_benefit.masked_fill(
+                ~positive, -torch.inf
+            ).topk(keep_count, sorted=True).indices
+            width = current_tokens.shape[2]
+            for flat_index_tensor in ranked:
+                flat_index = int(flat_index_tensor)
+                pixel_index, after = divmod(flat_index, N_TOKENS)
+                row, col = divmod(pixel_index, width)
+                before = int(current_tokens[batch_index, row, col])
+                moves.append(TokenMove(
+                    batch_index=batch_index,
+                    parameter_index=parameter_index,
+                    row=row,
+                    col=col,
+                    before=before,
+                    after=after,
+                    benefit=float(category_benefit[row, col, after]),
+                    perception_benefit=float(
+                        gradient[batch_index, row, col, before]
+                        - gradient[batch_index, row, col, after]
+                    ),
+                    direct_rate_benefit_bits=float(
+                        rate_bits[batch_index, row, col, before]
+                        - rate_bits[batch_index, row, col, after]
+                    ),
+                ))
+                if attempted_masks is not None:
+                    if attempted_masks[parameter_index].dtype == torch.bool:
+                        attempted_masks[parameter_index][row, col] = True
+                    else:
+                        attempted_masks[parameter_index][row, col] |= 1 << after
+            continue
+
         flat_benefit = benefit[batch_index].reshape(-1)
         positive = flat_benefit > 0
         if attempted_masks is not None and attempted_masks[parameter_index].dtype == torch.bool:
@@ -971,6 +1017,7 @@ def rank_token_moves(
             move.direct_rate_benefit_bits for move in moves
         ),
         "proposal_mode": "rate" if rate_only else "joint",
+        "independent_alternatives": independent_alternatives,
     }
 
 

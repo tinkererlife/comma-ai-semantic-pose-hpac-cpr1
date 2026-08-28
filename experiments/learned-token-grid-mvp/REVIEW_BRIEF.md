@@ -140,18 +140,29 @@ instead of 17.03 s (`8.20x`).  Four full 600-frame sweeps fell from 2,825.9 s to
 `2.2e-6`.  Batch 75 is the largest useful search batch on a 40 GiB A100; batch
 100 exceeds memory once before/after temporal contexts are materialized.
 
+The next test evaluates eight independent pixel/category alternatives per frame
+instead of committing the rate model's first choice.  On the same 32 frames,
+K=1 accepted 0/32 in 13.9 s while K=8 accepted 4/256 in 28.9 s and improved the
+projected score by `0.00014199`.  The decisive 600-frame L40S pass evaluated
+4,800 alternatives in 472.2 s, accepted 38 (13 deliberate perception-for-rate
+trades), and improved the projected official score by only `0.00004072` with a
+24.54 GiB peak.  This is a real candidate-quality win but far below the
+predeclared `0.0002--0.0003` go threshold, so more identical single-token sweeps
+are not the route to first place.  Checkpoints now include the compressed exact
+category-attempt history; the 600-frame file records all 4,800 evaluations.
+
 ## Why this is still only a conservative MVP
 
-The grid contains 117,964,800 token positions, but the final artifact differs
-from #130 in only 875.  We did not perform a global joint optimization over all
-tokens and the decoder.  The measured search phases tried only 15,600 out of
-roughly 472 million possible single-token category changes.  In particular, we
-did not implement:
+The grid contains 117,964,800 token positions.  The deployed artifact differs
+from #130 in only 875 positions and the best Top-K grid in 913.  We did not
+perform a global joint optimization over all tokens and the decoder.  The
+production-scale search phases tried only 20,400 out of roughly 472 million
+possible single-token category changes.  In particular, we did not implement:
 
 - a persistent freely learned grid over all 600 frames with a scalable discrete
   optimizer;
-- persistent search-state checkpoints for continuing beyond four new sweeps
-  without revisiting prior rejected candidates;
+- invalidation and selective re-ranking of attempt history after nearby
+  accepted changes alter the HPAC context;
 - region, contour, block or temporal-tube moves instead of isolated pixels;
 - exact final arithmetic-coded byte length inside every acceptance decision
   (the oracle matches deployed HPAC probabilities and ideal bits);
@@ -169,8 +180,8 @@ Please focus on missed algorithmic potential rather than style:
    without a scale, indexing, context or projection error?
 2. HPAC ideal bits predicted about 449 saved bytes while the real range coder
    saved 248.  Can acceptance cheaply target actual coder bytes more closely?
-3. Can the still-serial exact localized HPAC rechecks be vectorized across
-   same-parity frames without losing bit-identical decisions?
+3. Which cheap proposal model can rank structural candidates better than direct
+   one-symbol HPAC surprise without putting an unreliable gradient in the gate?
 4. What is the simplest scalable rate-first search over structural moves:
    contours, connected regions, blocks, or temporal tubes?
 5. Should optimization alternate between (A) metric-neutral byte removal and
