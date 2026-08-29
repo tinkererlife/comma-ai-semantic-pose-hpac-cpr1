@@ -3,7 +3,7 @@
 This is the public reproducibility repository for
 [`semantic-pose-HPAC_CPR1`](https://github.com/commaai/comma_video_compression_challenge/pull/130).
 This fork learns a hard five-symbol token grid, then searches exact pixel and rectangular rate-distortion moves with vectorized HPAC rechecks.
-Reproducibility warning (2026-08-29): a fresh inflate of the saved `0.167289` archive scored about `0.25`; that score and rank claim are historical and invalid until the pose-carrier runtime discrepancy is resolved.
+The official L40S A/B scores `0.167289` (`-0.58%` versus its same-machine control, rank 3 when measured); every new GPU rail must first pass the frozen #130 golden-archive check.
 It preserves two separate guarantees:
 
 1. a byte-exact rebuild of the frozen 191,052-byte CPR1 submission artifact;
@@ -18,7 +18,7 @@ The complete predecessor attribution and originality boundaries are in
 write-up is available at
 <https://fesalfayed.com/blog/semantic-pose-compression/>.
 
-The historical 600-sample `linux-nvidia-t4` evaluation reports a
+The completed official 600-sample `linux-nvidia-t4` evaluation reports a
 full-precision score of `0.1677066352` (displayed as `0.17`).
 
 The canonical charged artifact is:
@@ -139,6 +139,9 @@ Run the complete local integrity suite:
 ```bash
 bash scripts/verify.sh
 ```
+
+Before experiments on a fresh GPU machine, run `scripts/evaluate_golden.sh`; it
+refuses to proceed unless the pinned #130 archive reproduces its official score band.
 
 It audits size, duplicates, common secret formats, all retained artifact
 hashes, the full frozen rebuild, CPR1 randomized/malformed-stream tests, the

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -19,6 +20,14 @@ PATTERNS = {
     "rate": r"Compression Rate:\s*([0-9.eE+-]+)",
     "displayed_score": r"Final score:.*=\s*([0-9.eE+-]+)",
 }
+
+
+def file_digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
 
 
 def extract(text: str, name: str) -> str:
@@ -75,14 +84,89 @@ def parse_report(text: str, actual_archive_bytes: int) -> dict[str, object]:
     }
 
 
+def verify_golden(
+    result: dict[str, object],
+    archive: Path,
+    *,
+    expected_archive_sha256: str,
+    expected_pose: float,
+    expected_seg: float,
+    expected_score: float,
+    pose_atol: float,
+    seg_atol: float,
+    score_atol: float,
+) -> None:
+    actual_sha256 = file_digest(archive)
+    if actual_sha256 != expected_archive_sha256:
+        raise ValueError(
+            "golden archive hash mismatch: "
+            f"{actual_sha256} != {expected_archive_sha256}"
+        )
+    checks = (
+        (
+            "PoseNet distortion",
+            float(result["average_posenet_distortion"]),
+            expected_pose,
+            pose_atol,
+        ),
+        (
+            "SegNet distortion",
+            float(result["average_segnet_distortion"]),
+            expected_seg,
+            seg_atol,
+        ),
+        (
+            "full-precision score",
+            float(result["recomputed_full_precision_score"]),
+            expected_score,
+            score_atol,
+        ),
+    )
+    failures = [
+        f"{name}: {actual} not within {atol} of {expected}"
+        for name, actual, expected, atol in checks
+        if abs(actual - expected) > atol
+    ]
+    if failures:
+        raise ValueError("golden evaluation mismatch:\n  " + "\n  ".join(failures))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--expected-archive-sha256")
+    parser.add_argument("--expected-pose", type=float)
+    parser.add_argument("--expected-seg", type=float)
+    parser.add_argument("--expected-score", type=float)
+    parser.add_argument("--pose-atol", type=float, default=1e-5)
+    parser.add_argument("--seg-atol", type=float, default=1e-5)
+    parser.add_argument("--score-atol", type=float, default=0.01)
     args = parser.parse_args()
 
     result = parse_report(args.report.read_text(), args.archive.stat().st_size)
+    expected = (
+        args.expected_archive_sha256,
+        args.expected_pose,
+        args.expected_seg,
+        args.expected_score,
+    )
+    if any(value is not None for value in expected):
+        if any(value is None for value in expected):
+            raise ValueError("all golden expectations must be supplied together")
+        verify_golden(
+            result,
+            args.archive,
+            expected_archive_sha256=args.expected_archive_sha256,
+            expected_pose=args.expected_pose,
+            expected_seg=args.expected_seg,
+            expected_score=args.expected_score,
+            pose_atol=args.pose_atol,
+            seg_atol=args.seg_atol,
+            score_atol=args.score_atol,
+        )
+        result["golden_archive_passed"] = True
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps(result, indent=2, sort_keys=True))
