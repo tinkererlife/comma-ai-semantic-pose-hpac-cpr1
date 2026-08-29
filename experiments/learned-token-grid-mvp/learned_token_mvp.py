@@ -1009,7 +1009,6 @@ def main() -> None:
                 global_ids,
                 master_eval,
                 master_camera,
-                seg_input,
                 seg_logits,
                 target_seg,
                 seg_proxy,

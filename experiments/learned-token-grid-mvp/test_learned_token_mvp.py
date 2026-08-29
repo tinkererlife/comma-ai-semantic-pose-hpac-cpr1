@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import lzma
 import numpy as np
+import pytest
 import torch
 
 from hpac_token_search import (
@@ -14,6 +15,12 @@ from hpac_token_search import (
 )
 from materialize_learned_cache import replace_tokens
 from replace_archive_tokens import replace_token_stream
+from finetune_renderer_on_tokens import (
+    archive_token_stream,
+    build_training_stages,
+    c1a_entropy,
+    softplus_margin_loss,
+)
 from learned_token_mvp import (
     differentiable_rate_proxy,
     hard_conditional_entropy,
@@ -28,6 +35,33 @@ from learned_token_mvp import (
     token_rate_statistics,
     unpack_attempt_history,
 )
+
+
+def test_renderer_curriculum_aligns_stage_parameters() -> None:
+    stages = build_training_stages("1,2,3", "0,0.002,0.01", "0.2,0.2,0.1", 4.0)
+    assert [stage.epochs for stage in stages] == [1, 2, 3]
+    assert [stage.c1a_lambda for stage in stages] == [0.0, 0.002, 0.01]
+    assert [stage.hard_pixel_boost for stage in stages] == [0.0, 4.0, 4.0]
+    with pytest.raises(ValueError, match="must align"):
+        build_training_stages("1,2", "0", "0.2,0.1", 4.0)
+
+
+def test_softplus_margin_focuses_uncertain_predictions() -> None:
+    target = torch.zeros((1, 1, 2), dtype=torch.long)
+    easy = torch.tensor([[[[5.0, 0.0]]], [[[0.0, 0.0]]]]).permute(1, 0, 2, 3)
+    boundary = torch.zeros_like(easy)
+    easy_loss = softplus_margin_loss(easy, target, 0.3, 1.0, 0.0)
+    boundary_loss = softplus_margin_loss(boundary, target, 0.3, 1.0, 0.0)
+    assert easy_loss < boundary_loss
+
+
+def test_c1a_prefers_clustered_int4_codes() -> None:
+    clustered = torch.nn.Parameter(torch.ones((4, 15)))
+    spread = torch.nn.Parameter(torch.linspace(-1.0, 1.0, 15).repeat(4, 1))
+    clustered_entropy = c1a_entropy([("weight", clustered)], 4, 0.1)
+    spread_entropy = c1a_entropy([("weight", spread)], 4, 0.1)
+    assert clustered_entropy < 0.01
+    assert spread_entropy > 3.0
 
 
 def test_straight_through_forward_is_hard_and_backward_is_soft() -> None:
