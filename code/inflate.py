@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import lzma
 import math
+import os
 import struct
 import sys
 import time
@@ -44,6 +45,7 @@ HPAC_LOGIT_PRECISION = 8
 HPAC_TARGET_MODE = "raw"
 HPAC_CODER_PERFECT = False
 HPAC_HIERARCHICAL = False
+RC64_MODEL_LENGTH_FLAG = 1 << 31
 HPAC_PACKED_SCHEMA = (
     ("conv_a.weight_q", (64, 7, 23), "i1"),
     ("conv_a.weight_scale", (64,), "<f2"),
@@ -557,11 +559,27 @@ def hierarchical_decode(decoder, families, table: np.ndarray):
 
 
 @torch.no_grad()
-def decode_tokens(model: IntegerHPAC, blob: bytes, device: torch.device):
-    if len(blob) % np.dtype("<u4").itemsize:
-        raise ValueError("HPAC token payload length is not a multiple of four")
-    decoder = constriction.stream.queue.RangeDecoder(np.frombuffer(blob, dtype="<u4"))
-    family = constriction.stream.model.Categorical(perfect=HPAC_CODER_PERFECT)
+def decode_tokens(
+    model: IntegerHPAC, blob: bytes, device: torch.device,
+    token_codec: str = "range32",
+):
+    if token_codec == "rc64":
+        from rc64 import NativeDecoder
+
+        library = os.environ.get("CPR1_RC64_LIBRARY")
+        if not library:
+            raise ValueError("RC64 decoding requires CPR1_RC64_LIBRARY")
+        decoder = NativeDecoder(Path(library), blob)
+        family = None
+    else:
+        if len(blob) % np.dtype("<u4").itemsize:
+            raise ValueError("HPAC token payload length is not a multiple of four")
+        decoder = constriction.stream.queue.RangeDecoder(
+            np.frombuffer(blob, dtype="<u4")
+        )
+        family = constriction.stream.model.Categorical(
+            perfect=HPAC_CODER_PERFECT
+        )
     hierarchical_families = (
         constriction.stream.model.Categorical(perfect=HPAC_CODER_PERFECT),
         constriction.stream.model.Categorical(perfect=HPAC_CODER_PERFECT),
@@ -578,11 +596,14 @@ def decode_tokens(model: IntegerHPAC, blob: bytes, device: torch.device):
         for group, mask in enumerate(masks):
             selected = sparse.selected_logits(current, context, group)
             table = probability_table(selected)
-            symbols = (
-                hierarchical_decode(decoder, hierarchical_families, table)
-                if HPAC_HIERARCHICAL
-                else decoder.decode(family, table)
-            )
+            if token_codec == "rc64":
+                symbols = decoder.decode(table)
+            else:
+                symbols = (
+                    hierarchical_decode(decoder, hierarchical_families, table)
+                    if HPAC_HIERARCHICAL
+                    else decoder.decode(family, table)
+                )
             current[0, mask] = torch.from_numpy(symbols.astype(np.int64)).to(device)
         previous_raw = (
             current.clone()
@@ -670,7 +691,9 @@ def main():
     payload = (data_dir / "p").read_bytes()
     if len(payload) < 4:
         raise ValueError("combined payload is truncated before the model length")
-    models_bytes = struct.unpack_from("<I", payload)[0]
+    models_field = struct.unpack_from("<I", payload)[0]
+    token_codec = "rc64" if models_field & RC64_MODEL_LENGTH_FLAG else "range32"
+    models_bytes = models_field & ~RC64_MODEL_LENGTH_FLAG
     if len(payload) <= 4 + models_bytes:
         raise ValueError("combined payload is truncated")
     models_raw = lzma.decompress(payload[4:4 + models_bytes])
@@ -684,7 +707,9 @@ def main():
         models_raw[:semantic_pose_bytes]
     )
     hpac = load_hpac(models_raw[semantic_pose_bytes:], device)
-    tokens = decode_tokens(hpac, payload[4 + models_bytes:], device)
+    tokens = decode_tokens(
+        hpac, payload[4 + models_bytes:], device, token_codec=token_codec
+    )
     del hpac
     torch.cuda.empty_cache()
     render_video(semantic, basis, coeff, tokens, destination, device)

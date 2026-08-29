@@ -3,7 +3,7 @@
 - **Submission:** `semantic-pose-HPAC_CPR1`
 - **Challenge pull request:** [commaai/comma_video_compression_challenge#130][pr130]
 - **Reproducibility repository:** [fesalfayed/comma-ai-semantic-pose-hpac-cpr1][repro]
-- **As of:** 2026-07-19
+- **As of:** 2026-08-29
 - **Scope:** Technical provenance and attribution within the public comma video
   compression challenge lineage. This is not a global patent search or legal
   opinion.
@@ -86,6 +86,7 @@ qpose code was copied into this implementation.
 | 2026-05-04 | jas0xf PR [#86][pr86], merge `14bcede815306415a0005c3cd98804151bce4049` | Public challenge adaptation combining a semantic-token renderer, NeRV slave, HPAC token model, and arithmetic decoding [2-4]. |
 | 2026-07-19 | PR [#130][pr130] and release [`semantic-pose-HPAC_CPR1`][release] | Integer-lattice HPAC, learned gray pose carrier, exact carrier compression, and frozen submission provenance [8, 9]. |
 | 2026-07-19 | Reproducibility repository [10] | Frozen byte-exact rebuild plus a non-circular raw-video-to-official-score recipe. |
+| 2026-08-08 | `semantic-pose-HPAC_CPR1_polished` PR [#135][pr135] | Public RC64 five-symbol arithmetic coder and exact lossless CPR1 representation improvements [11]. |
 
 The challenge PR is based on a repository state containing the PR #86 merge.
 That chronology is mechanically verifiable in the challenge repository:
@@ -115,6 +116,7 @@ measure scientific novelty.
 | Standalone neutral-gray pose carrier | No equivalent found in the audited predecessors | `127.5 + amplitude * einsum(coeff, normalized_basis)`, independent of the semantic renderer [8] | **Original within this audited lineage** |
 | Integer-lattice HPAC inference | PR #86 uses the same backbone, but not this bounded integer execution path [4] | Integer convolutions/linears, dyadic requantization, bounded activations, and a 1/8-logit lattice [8] | **Original extension within this audited lineage** |
 | Canonical Huffman/Rice carrier repack | No equivalent found for this carrier in the audited predecessors | Exact basis/coeff repack, deterministic ZIP, decoded-state equality, and malformed-stream rejection [8, 9] | **Original artifact/codec engineering** |
+| RC64 five-symbol arithmetic coding | PR #135 and its public ExperimentBook [11] | Directly adapted as an optional lossless replacement for the inherited range32 token stream; the decoded token grid is required to remain exact | **Inherited from PR #135; not claimed as original** |
 
 ## Claim boundaries
 
@@ -137,6 +139,7 @@ Claims not made:
   convolutions, or arithmetic-coded HPAC tokens.”
 - “We invented asymmetric master/slave evaluator factorization.”
 - “We invented low-rank pose actuation.”
+- “We invented RC64 or its 63-bit five-symbol arithmetic coder.”
 - “The whole decoder is bit-identical across GPUs.”
 - “The Ada result is an official T4 result.”
 
@@ -228,10 +231,18 @@ questions:
     - [`evidence/cpr1_verification.json`](evidence/cpr1_verification.json)
     - [`scripts/reproduce.sh`](scripts/reproduce.sh)
     - [`scripts/e2e.py`](scripts/e2e.py)
+11. codexblack, `semantic-pose-HPAC_CPR1_polished` challenge PR #135 and
+    immutable public ExperimentBook RC64 implementation at commit
+    `f229b26735dffc53fdf1ac9987ac7c303298d028`:
+    - <https://github.com/commaai/comma_video_compression_challenge/pull/135>
+    - <https://github.com/codexblack/CommaVideoCompressionChallenge_ExperimentBook/blob/f229b26735dffc53fdf1ac9987ac7c303298d028/src/cpr1_sub4/entropy/rc64.py>
+    - <https://github.com/codexblack/CommaVideoCompressionChallenge_ExperimentBook/blob/f229b26735dffc53fdf1ac9987ac7c303298d028/src/cpr1_sub4/entropy/rc64_backend.c>
+    - <https://github.com/codexblack/CommaVideoCompressionChallenge_ExperimentBook/blob/f229b26735dffc53fdf1ac9987ac7c303298d028/docs/F16_RC64.md>
 
 [pr67]: https://github.com/commaai/comma_video_compression_challenge/pull/67
 [pr79]: https://github.com/commaai/comma_video_compression_challenge/pull/79
 [pr86]: https://github.com/commaai/comma_video_compression_challenge/pull/86
 [pr130]: https://github.com/commaai/comma_video_compression_challenge/pull/130
+[pr135]: https://github.com/commaai/comma_video_compression_challenge/pull/135
 [release]: https://github.com/fesalfayed/comma_video_compression_challenge/releases/tag/semantic-pose-HPAC_CPR1
 [repro]: https://github.com/fesalfayed/comma-ai-semantic-pose-hpac-cpr1

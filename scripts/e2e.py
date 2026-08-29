@@ -30,6 +30,8 @@ RUNTIME_FILES = (
     "hpac_integer.py",
     "hpac_integer_sparse.py",
     "integer_model_io.py",
+    "rc64.py",
+    "rc64_backend.c",
 )
 RUNTIME_PACKAGES = (
     "constriction",

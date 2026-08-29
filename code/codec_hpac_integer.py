@@ -59,9 +59,20 @@ def load_model(path: Path, args, device):
 
 
 @torch.no_grad()
-def encode(model, raw_tokens, targets, masks, device, sparse=None):
-    encoder = constriction.stream.queue.RangeEncoder()
-    family = constriction.stream.model.Categorical(perfect=False)
+def encode(
+    model, raw_tokens, targets, masks, device, sparse=None,
+    coder: str = "range32", rc64_library: Path | None = None,
+):
+    if coder == "rc64":
+        if rc64_library is None:
+            raise ValueError("RC64 encoding requires --rc64-library")
+        from rc64 import NativeEncoder
+
+        encoder = NativeEncoder(rc64_library)
+        family = None
+    else:
+        encoder = constriction.stream.queue.RangeEncoder()
+        family = constriction.stream.model.Categorical(perfect=False)
     digest = hashlib.sha256()
     previous = torch.zeros((1, H, W), dtype=torch.long, device=device)
     ideal_bits = 0.0
@@ -82,7 +93,10 @@ def encode(model, raw_tokens, targets, masks, device, sparse=None):
             ideal_bits += float(-np.log2(
                 table[np.arange(len(symbols)), symbols].astype(np.float64)
             ).sum())
-            encoder.encode(symbols, family, table)
+            if coder == "rc64":
+                encoder.encode(symbols, table)
+            else:
+                encoder.encode(symbols, family, table)
             current[0, mask] = target[mask]
         previous = raw_tokens[frame].view(1, H, W)
         if frame == 0 or (frame + 1) % 25 == 0:
@@ -90,16 +104,33 @@ def encode(model, raw_tokens, targets, masks, device, sparse=None):
                 "encoded_frames": frame + 1,
                 "elapsed_seconds": time.time() - started,
             }), flush=True)
-    return encoder.get_compressed().tobytes(), digest.hexdigest(), ideal_bits
+    blob = (
+        encoder.finish()
+        if coder == "rc64"
+        else encoder.get_compressed().tobytes()
+    )
+    return blob, digest.hexdigest(), ideal_bits
 
 
 @torch.no_grad()
 def decode(
     model, blob: bytes, frame_count: int, masks, device, target_mode: str,
-    sparse=None,
+    sparse=None, coder: str = "range32", rc64_library: Path | None = None,
 ):
-    decoder = constriction.stream.queue.RangeDecoder(np.frombuffer(blob, dtype=np.uint32))
-    family = constriction.stream.model.Categorical(perfect=False)
+    if coder == "rc64":
+        if rc64_library is None:
+            raise ValueError("RC64 decoding requires --rc64-library")
+        from rc64 import NativeDecoder
+
+        decoder = NativeDecoder(rc64_library, blob)
+        family = None
+    else:
+        if len(blob) % np.dtype("<u4").itemsize:
+            raise ValueError("range32 token payload length is not a multiple of four")
+        decoder = constriction.stream.queue.RangeDecoder(
+            np.frombuffer(blob, dtype="<u4")
+        )
+        family = constriction.stream.model.Categorical(perfect=False)
     digest = hashlib.sha256()
     output = torch.empty((frame_count, H, W), dtype=torch.uint8)
     previous = torch.zeros((1, H, W), dtype=torch.long, device=device)
@@ -115,7 +146,11 @@ def decode(
             else:
                 selected = sparse.selected_logits(current, context, group)
             table = probability_table(selected, digest)
-            symbols = decoder.decode(family, table).astype(np.int64)
+            symbols = (
+                decoder.decode(table).astype(np.int64)
+                if coder == "rc64"
+                else decoder.decode(family, table).astype(np.int64)
+            )
             current[0, mask] = torch.from_numpy(symbols).to(device)
         raw = current if target_mode == "raw" else (current + previous) % NUM_CLASSES
         previous = raw
@@ -156,6 +191,10 @@ def main() -> None:
     )
     parser.add_argument("--frames", type=int, default=N)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--coder", choices=("range32", "rc64"), default="range32"
+    )
+    parser.add_argument("--rc64-library", type=Path)
     parser.add_argument("--tokens-out", type=Path)
     parser.add_argument("--decode-from", type=Path)
     parser.add_argument("--raw-out", type=Path)
@@ -176,11 +215,12 @@ def main() -> None:
     if args.decode_from is not None:
         output, logit_hash = decode(
             model, args.decode_from.read_bytes(), args.frames, masks, device,
-            args.target_mode, sparse,
+            args.target_mode, sparse, args.coder, args.rc64_library,
         )
         raw = output.numpy().tobytes(order="C")
         result = {
             "frames": args.frames,
+            "coder": args.coder,
             "logit_hash_decode": logit_hash,
             "raw_token_sha256": hashlib.sha256(raw).hexdigest(),
         }
@@ -206,12 +246,14 @@ def main() -> None:
         )["seg"][:args.frames].long().to(device)
         targets = raw_tokens if args.target_mode == "raw" else residuals(raw_tokens)
         blob, logit_hash, ideal_bits = encode(
-            model, raw_tokens, targets, masks, device, sparse
+            model, raw_tokens, targets, masks, device, sparse,
+            args.coder, args.rc64_library,
         )
         args.tokens_out.parent.mkdir(parents=True, exist_ok=True)
         args.tokens_out.write_bytes(blob)
         result = {
             "frames": args.frames,
+            "coder": args.coder,
             "token_bytes": len(blob),
             "token_bpp": len(blob) * 8 / targets.numel(),
             "ideal_bpp": ideal_bits / targets.numel(),

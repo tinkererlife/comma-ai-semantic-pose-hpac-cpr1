@@ -23,6 +23,7 @@ LZMA_FILTERS = [{
     "mf": lzma.MF_BT4,
     "depth": 0,
 }]
+RC64_MODEL_LENGTH_FLAG = 1 << 31
 
 
 def replace_token_stream(
@@ -30,6 +31,7 @@ def replace_token_stream(
     tokens: bytes,
     output: Path,
     semantic_blob: bytes | None = None,
+    token_codec: str = "range32",
 ) -> dict:
     with zipfile.ZipFile(base_archive) as archive:
         infos = archive.infolist()
@@ -38,14 +40,20 @@ def replace_token_stream(
         payload = archive.read("p")
     if len(payload) < 4:
         raise ValueError("truncated CPR1 payload")
-    model_bytes = struct.unpack_from("<I", payload)[0]
+    model_field = struct.unpack_from("<I", payload)[0]
+    model_bytes = model_field & ~RC64_MODEL_LENGTH_FLAG
     token_offset = 4 + model_bytes
     if token_offset > len(payload):
         raise ValueError("model length exceeds CPR1 payload")
-    if not tokens or len(tokens) % 4:
-        raise ValueError("range-coded token stream must contain uint32 words")
+    if not tokens:
+        raise ValueError("token stream must not be empty")
+    if token_codec == "range32" and len(tokens) % 4:
+        raise ValueError("range32 token stream must contain uint32 words")
 
-    model_prefix = payload[:token_offset]
+    output_model_field = model_bytes | (
+        RC64_MODEL_LENGTH_FLAG if token_codec == "rc64" else 0
+    )
+    model_prefix = struct.pack("<I", output_model_field) + payload[4:token_offset]
     preserved_model_bytes = None
     if semantic_blob is not None:
         models_raw = lzma.decompress(payload[4:token_offset])
@@ -64,7 +72,10 @@ def replace_token_stream(
         rebuilt_models = lzma.compress(
             rebuilt_models_raw, format=lzma.FORMAT_XZ, filters=LZMA_FILTERS
         )
-        model_prefix = struct.pack("<I", len(rebuilt_models)) + rebuilt_models
+        output_model_field = len(rebuilt_models) | (
+            RC64_MODEL_LENGTH_FLAG if token_codec == "rc64" else 0
+        )
+        model_prefix = struct.pack("<I", output_model_field) + rebuilt_models
         preserved_model_bytes = len(preserved)
 
     rebuilt = model_prefix + tokens
@@ -82,6 +93,7 @@ def replace_token_stream(
         "learned_model_prefix_bytes": len(model_prefix),
         "base_token_bytes": len(payload) - token_offset,
         "learned_token_bytes": len(tokens),
+        "token_codec": token_codec,
         "semantic_replaced": semantic_blob is not None,
         "semantic_bytes": len(semantic_blob) if semantic_blob is not None else None,
         "preserved_model_bytes": preserved_model_bytes,
@@ -94,6 +106,9 @@ def main() -> None:
     parser.add_argument("--base-archive", type=Path, required=True)
     parser.add_argument("--tokens", type=Path, required=True)
     parser.add_argument("--semantic-blob", type=Path)
+    parser.add_argument(
+        "--token-codec", choices=("range32", "rc64"), default="range32"
+    )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
@@ -102,6 +117,7 @@ def main() -> None:
         args.tokens.read_bytes(),
         args.out,
         args.semantic_blob.read_bytes() if args.semantic_blob else None,
+        args.token_codec,
     )
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, indent=2) + "\n")
