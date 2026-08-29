@@ -171,6 +171,27 @@ The internal ideal-bit/perception projection predicted `0.0002516870`, so it
 overstated the gain by about 46%; the byte prediction was close (188 predicted
 versus 176 actual), and nearly all error came from the cached perception gate.
 
+The RunPod reproduction found the perception-gate mismatch.  Official inflate
+disables TF32 while the separate evaluator retains cuDNN TF32 and constructs its
+input via a contiguous BHWC buffer followed by a CHW view.  Our combined search
+process had disabled TF32 for both renderer and metric models and bypassed that
+layout.  The gate now preserves exact inflate rendering but locally enables the
+official metric path.  Its no-op control matches the official full-precision
+metric, and a fresh 600-frame multiscale sweep accepted 215/4,800 proposals (34
+explicit perception-for-rate trades).  The real stream fell from 116,604 to
+116,356 bytes; official L40S evaluation gives an approximately `0.167426` score,
+`-0.0008375` (`-0.50%`) versus the same-machine control and rank 3 on the current
+leaderboard.  The archived proxy delta was `-0.0008534`, within about `1.9%` of
+the realized improvement.
+
+A second category-aware sweep accepted 61/4,800 more proposals (10 explicit
+perception-for-rate trades).  The deployed stream fell another 40 bytes to
+116,316 bytes and the archive to 190,376 bytes.  Official L40S evaluation gives
+approximately `0.167289`: `-0.0009741` (`-0.58%`) versus the same-machine
+control, `-2.82%` versus #130, and still rank 3.  Its marginal gain was only
+about 16% of pass 1, evidence that this fixed proposal family is beginning to
+saturate.
+
 ## Why this is still only a conservative MVP
 
 The grid contains 117,964,800 token positions.  The previous deployed artifact
@@ -197,9 +218,8 @@ of this narrow implementation.  It is not an estimate of the idea's ceiling.
 
 Please focus on missed algorithmic potential rather than style:
 
-1. Why did the cached perception gate overstate the structural A/B gain by about
-   46%, and how should it be aligned with the hardware-dependent official DALI
-   pipeline without running a full official evaluation per candidate?
+1. Is the corrected evaluator-matched gate portable across the official T4 and
+   L40S paths, or should acceptance be calibrated separately per GPU family?
 2. The latest HPAC ideal-bit delta predicted about 188 saved bytes and the real
    range coder saved 176.  Can acceptance cheaply target those final bytes?
 3. Which cheap proposal model can rank structural candidates better than direct

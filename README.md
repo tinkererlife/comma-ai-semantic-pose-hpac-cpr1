@@ -3,7 +3,7 @@
 This is the public reproducibility repository for
 [`semantic-pose-HPAC_CPR1`](https://github.com/commaai/comma_video_compression_challenge/pull/130).
 This fork learns a hard five-symbol token grid, then searches exact pixel and rectangular rate-distortion moves with vectorized HPAC rechecks.
-The structural grid wins `0.00013669` in a same-L40S A/B and projects `0.167570` on the prior T4 baseline (rank 3).
+The official L40S A/B now scores `0.167289` (`-0.58%` vs. its control, rank 3) after aligning the search gate with the official evaluator.
 It preserves two separate guarantees:
 
 1. a byte-exact rebuild of the frozen 191,052-byte CPR1 submission artifact;

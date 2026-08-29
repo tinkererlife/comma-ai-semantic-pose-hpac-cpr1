@@ -296,6 +296,25 @@ def camera_and_seg_input(master_eval: torch.Tensor) -> tuple[torch.Tensor, torch
     return camera, seg_input
 
 
+def official_metric_predictions(
+    segnet: torch.nn.Module,
+    posenet: torch.nn.Module,
+    slave_camera: torch.Tensor, master_camera: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    pair_bhwc = torch.stack([slave_camera, master_camera], dim=1).permute(
+        0, 1, 3, 4, 2
+    ).contiguous()
+    pair_chw = pair_bhwc.permute(0, 1, 4, 2, 3)
+    previous_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    torch.backends.cudnn.allow_tf32 = True
+    try:
+        seg_logits = segnet(segnet.preprocess_input(pair_chw))
+        pose = posenet(posenet.preprocess_input(pair_chw))["pose"][:, :6]
+    finally:
+        torch.backends.cudnn.allow_tf32 = previous_cudnn_tf32
+    return seg_logits, pose
+
+
 def expected_flip_loss(
     logits: torch.Tensor, target: torch.Tensor, tau: float = 0.15
 ) -> torch.Tensor:
@@ -432,8 +451,12 @@ def evaluate_exact(
         )
         token_batch = hard_tokens[selected].to(device=device, dtype=torch.long)
         master_eval = model(token_batch, global_ids)
-        master_camera, seg_input = camera_and_seg_input(master_eval)
-        seg_pred = segnet(seg_input).argmax(dim=1)
+        master_camera, _ = camera_and_seg_input(master_eval)
+        slave = slaves[selected].to(device=device, dtype=torch.float32)
+        seg_logits, pose_pred = official_metric_predictions(
+            segnet, posenet, slave, master_camera
+        )
+        seg_pred = seg_logits.argmax(dim=1)
         target_seg = seg_targets[selected].to(device)
         frame_mismatches = (seg_pred != target_seg).reshape(
             len(selected), -1
@@ -441,8 +464,6 @@ def evaluate_exact(
         mismatches += frame_mismatches.sum()
         pixels += target_seg.numel()
 
-        slave = slaves[selected].to(device=device, dtype=torch.float32)
-        pose_pred = pose_output(posenet, torch.stack([slave, master_camera], dim=1))
         target_pose = pose_targets[selected].to(device)
         frame_pose_error = (pose_pred - target_pose).square().reshape(
             len(selected), -1
@@ -743,7 +764,7 @@ def main() -> None:
     random.seed(args.seed)
     device = torch.device(args.device)
     if device.type == "cuda":
-        # Keep A100/H100 TF32 kernels from changing exact accept/reject decisions.
+        # Match the deployed inflate path; metric forwards enable official TF32 locally.
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
     recipe_root = args.recipe_root.resolve()
@@ -827,7 +848,7 @@ def main() -> None:
         }), flush=True)
 
     slaves = render_frozen_slaves(
-        basis, coeff, pair_ids, device, batch_size=args.eval_batch_size
+        basis, coeff, pair_ids, device, batch_size=64
     )
 
     baseline_metrics = evaluate_exact(
@@ -949,15 +970,14 @@ def main() -> None:
                 device=device,
             )
             master_eval = renderer_from_assignments(model, assignments, global_ids)
-            master_camera, seg_input = camera_and_seg_input(master_eval)
-            seg_logits = segnet(seg_input)
+            master_camera, _ = camera_and_seg_input(master_eval)
+            slave = slaves[selected].to(device=device, dtype=torch.float32)
+            seg_logits, pose_pred = official_metric_predictions(
+                segnet, posenet, slave, master_camera
+            )
             target_seg = seg_targets[selected].to(device)
             seg_proxy = expected_flip_loss(seg_logits, target_seg)
 
-            slave = slaves[selected].to(device=device, dtype=torch.float32)
-            pose_pred = pose_output(
-                posenet, torch.stack([slave, master_camera], dim=1)
-            )
             target_pose = pose_targets[selected].to(device)
             pose_mse = (pose_pred - target_pose).square().mean()
             rate_proxy = (
