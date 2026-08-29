@@ -3,7 +3,7 @@
 This is the public reproducibility repository for
 [`semantic-pose-HPAC_CPR1`](https://github.com/commaai/comma_video_compression_challenge/pull/130).
 This fork learns a hard five-symbol token grid, searches exact rate-distortion moves, then losslessly ports [#135](https://github.com/commaai/comma_video_compression_challenge/pull/135)'s RC64 token coder.
-The pinned L40S rail scored `0.165896` (`-2.70%` versus same-machine #130), projected rank 2 behind #135; every new rail must pass the frozen #130 control and final claims require T4 validation.
+The pinned L40S rail scored `0.165896` (`-2.70%` versus same-machine #130), projected rank 3 just behind #133's exact `0.165780`; every new rail must pass the frozen #130 control and final claims require T4 validation.
 It preserves two separate guarantees:
 
 1. a byte-exact rebuild of the frozen 191,052-byte CPR1 submission artifact;
