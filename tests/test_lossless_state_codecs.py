@@ -23,6 +23,7 @@ from model_bundle import (  # noqa: E402
     parse_model_field,
 )
 from wans1 import decode_wans1, encode_wans1  # noqa: E402
+from search_pose_coeff_joint import proposal as joint_pose_proposal  # noqa: E402
 
 
 def _canonical_bundle():
@@ -30,6 +31,10 @@ def _canonical_bundle():
         payload = archive.read("p")
     model_bytes, flags = parse_model_field(struct.unpack_from("<I", payload)[0])
     return payload, model_bytes, decode_model_bundle(payload[4:4 + model_bytes], flags)
+
+
+def test_joint_pose_search_entrypoint_is_retained():
+    assert callable(joint_pose_proposal)
 
 
 def test_wans1_and_cap1_exact_public_vectors():

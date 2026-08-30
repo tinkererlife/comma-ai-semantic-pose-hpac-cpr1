@@ -181,7 +181,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--challenge-root", type=Path, required=True)
     parser.add_argument("--target-cache", type=Path, required=True)
-    parser.add_argument("--master-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--master-checkpoint",
+        type=Path,
+        help="semantic checkpoint; omit when using an exact deployed master cache",
+    )
     parser.add_argument("--init-carrier", type=Path, required=True)
     parser.add_argument("--master-cache", type=Path, default=None)
     parser.add_argument("--reuse-master-cache", action="store_true")
@@ -241,26 +245,42 @@ def main() -> None:
         raise ValueError("target cache does not contain the expected 600 pairs")
     target_scale = (targets.amax(0) - targets.amin(0)).clamp_min(1e-4)
 
-    master_checkpoint = torch.load(args.master_checkpoint, map_location="cpu", weights_only=False)
-    master_config = master_checkpoint["config"]
-    master_model = SemanticTokenRenderer(
-        width=int(master_config["width"]), blocks=int(master_config["blocks"]),
-        frame_dim=int(master_config["frame_dim"]), num_pairs=N_TOTAL_PAIRS,
-    ).eval().to(device)
-    master_state = master_checkpoint["state_dict"]
-    if "quant_bits" in master_checkpoint:
-        from evaluate_semantic_quantization import quantize_tensor
+    if args.master_checkpoint is None:
+        if args.master_cache is None or not args.reuse_master_cache:
+            raise ValueError(
+                "omit --master-checkpoint only with --master-cache and "
+                "--reuse-master-cache"
+            )
+        master_payload = torch.load(
+            args.master_cache, map_location="cpu", weights_only=False
+        )
+        masters = master_payload.get("masters", master_payload.get("frames"))
+        expected = (N_TOTAL_PAIRS, 3, CAMERA_H, CAMERA_W)
+        if tuple(masters.shape) != expected or masters.dtype != torch.uint8:
+            raise ValueError(f"master cache must be uint8 with shape {expected}")
+    else:
+        master_checkpoint = torch.load(
+            args.master_checkpoint, map_location="cpu", weights_only=False
+        )
+        master_config = master_checkpoint["config"]
+        master_model = SemanticTokenRenderer(
+            width=int(master_config["width"]), blocks=int(master_config["blocks"]),
+            frame_dim=int(master_config["frame_dim"]), num_pairs=N_TOTAL_PAIRS,
+        ).eval().to(device)
+        master_state = master_checkpoint["state_dict"]
+        if "quant_bits" in master_checkpoint:
+            from evaluate_semantic_quantization import quantize_tensor
 
-        bits = int(master_checkpoint["quant_bits"])
-        master_state = {
-            name: quantize_tensor(
-                value, bits, embedding=name.endswith("embed.weight")
-            )[0]
-            for name, value in master_state.items()
-        }
-    master_model.load_state_dict(master_state)
-    masters = load_or_render_masters(args, master_model, tokens, device)
-    del master_model
+            bits = int(master_checkpoint["quant_bits"])
+            master_state = {
+                name: quantize_tensor(
+                    value, bits, embedding=name.endswith("embed.weight")
+                )[0]
+                for name, value in master_state.items()
+            }
+        master_model.load_state_dict(master_state)
+        masters = load_or_render_masters(args, master_model, tokens, device)
+        del master_model
     torch.cuda.empty_cache()
     if args.cache_masters_on_device:
         masters = masters.to(device=device, non_blocking=True)
@@ -459,7 +479,17 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2) + "\n")
     args.save.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"basis": best["basis"], "coeff": best["coeff"], "result": result}, args.save)
+    torch.save({
+        "basis": best["basis"],
+        "coeff": best["coeff"],
+        "basis_codes": basis_codes.detach().cpu(),
+        "basis_scales": basis_scales.detach().cpu(),
+        "coeff_codes": coeff_codes.detach().cpu(),
+        "coeff_scales": coeff_scales.detach().cpu(),
+        "deployed_basis": basis_q.detach().cpu(),
+        "deployed_coeff": coeff_q.detach().cpu(),
+        "result": result,
+    }, args.save)
     print(json.dumps(result, indent=2), flush=True)
 
 
