@@ -35,7 +35,7 @@ from learned_token_mvp import (
     token_rate_statistics,
     unpack_attempt_history,
 )
-from search_f24_hard_tokens import candidate_moves
+from search_f24_hard_tokens import candidate_groups, candidate_moves
 
 
 def test_renderer_curriculum_aligns_stage_parameters() -> None:
@@ -194,6 +194,18 @@ def test_f24_candidate_ranking_trades_distortion_for_enough_rate() -> None:
     # small perception gain.
     assert move[:4] == (0, 0, 0, 1)
     assert move[4] > 0
+
+
+def test_f24_pair_candidates_never_overwrite_the_same_pixel() -> None:
+    moves = [
+        (0, 0, 0, 1, 4.0),
+        (0, 0, 0, 2, 3.0),
+        (0, 1, 0, 1, 2.0),
+    ]
+
+    groups = candidate_groups(moves, count=2, changes=2)
+
+    assert groups == [[moves[0], moves[2]], [moves[1], moves[2]]]
 
 
 def test_rate_only_moves_are_spatially_separated() -> None:

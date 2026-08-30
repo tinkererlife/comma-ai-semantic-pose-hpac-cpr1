@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import itertools
 import json
 import math
 import struct
@@ -197,6 +198,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokens", type=Path, required=True)
     parser.add_argument("--top-k", type=int, default=16)
     parser.add_argument("--candidates-per-frame", type=int, default=8)
+    parser.add_argument(
+        "--changes-per-candidate", type=int, choices=(1, 2), default=1
+    )
     parser.add_argument("--sweeps", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--init-margin", type=float, default=0.25)
@@ -326,6 +330,23 @@ def candidate_moves(
     return moves
 
 
+def candidate_groups(
+    moves: list[tuple[int, int, int, int, float]],
+    count: int,
+    changes: int,
+) -> list[list[tuple[int, int, int, int, float]]]:
+    """Form the strongest distinct-pixel block moves from ranked flips."""
+    if changes == 1:
+        return [[move] for move in moves[:count]]
+    groups = [
+        [left, right]
+        for left, right in itertools.combinations(moves, 2)
+        if left[:2] != right[:2]
+    ]
+    groups.sort(key=lambda group: sum(move[4] for move in group), reverse=True)
+    return groups[:count]
+
+
 @torch.no_grad()
 def exact_candidates(
     semantic,
@@ -333,27 +354,28 @@ def exact_candidates(
     posenet,
     token_grid: torch.Tensor,
     frame: int,
-    moves: list[tuple[int, int, int, int, float]],
+    move_groups: list[list[tuple[int, int, int, int, float]]],
     slave: torch.Tensor,
     seg_target: torch.Tensor,
     pose_target: torch.Tensor,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    candidates = token_grid[None].repeat(len(moves), 1, 1)
-    for index, (row, col, _, after, _) in enumerate(moves):
-        candidates[index, row, col] = after
-    ids = torch.full((len(moves),), frame, dtype=torch.long, device=device)
+    candidates = token_grid[None].repeat(len(move_groups), 1, 1)
+    for index, moves in enumerate(move_groups):
+        for row, col, _, after, _ in moves:
+            candidates[index, row, col] = after
+    ids = torch.full((len(move_groups),), frame, dtype=torch.long, device=device)
     masters = semantic(candidates.to(device).long(), ids)
     master_camera, _ = camera_and_seg_input(masters)
     seg_logits, pose = official_metric_predictions(
         segnet,
         posenet,
-        slave.to(device).float().expand(len(moves), -1, -1, -1),
+        slave.to(device).float().expand(len(move_groups), -1, -1, -1),
         master_camera,
     )
     mismatches = (
         seg_logits.argmax(1) != seg_target.to(device)[None]
-    ).reshape(len(moves), -1).sum(1).cpu()
+    ).reshape(len(move_groups), -1).sum(1).cpu()
     pose_mse = (
         pose - pose_target.to(device)[None]
     ).square().mean(1).cpu()
@@ -452,19 +474,31 @@ def main() -> None:
             )
             loss.backward()
             direct_rate_bits = rate_oracle.direct_symbol_bits(tokens, frame)
+            proposal_count = (
+                args.candidates_per_frame
+                if args.changes_per_candidate == 1
+                else max(args.candidates_per_frame, 32)
+            )
             moves = candidate_moves(
                 logits.grad[0],
                 local_tokens,
-                args.candidates_per_frame,
+                proposal_count,
                 direct_rate_bits,
             )
+            move_groups = candidate_groups(
+                moves,
+                args.candidates_per_frame,
+                args.changes_per_candidate,
+            )
+            if not move_groups:
+                continue
             candidates, mismatches, poses = exact_candidates(
                 semantic,
                 segnet,
                 posenet,
                 local_tokens,
                 frame,
-                moves,
+                move_groups,
                 slaves[frame:frame + 1],
                 targets["seg"][frame],
                 targets["pose"][frame],
@@ -508,13 +542,16 @@ def main() -> None:
                 "after_objective": new_objective,
                 "incremental_rate_bits": float(rate_deltas[best]),
                 "accepted": accepted_move,
-                "move": {
-                    "row": moves[best][0],
-                    "col": moves[best][1],
-                    "before": moves[best][2],
-                    "after": moves[best][3],
-                    "proposal_benefit": moves[best][4],
-                },
+                "moves": [
+                    {
+                        "row": move[0],
+                        "col": move[1],
+                        "before": move[2],
+                        "after": move[3],
+                        "proposal_benefit": move[4],
+                    }
+                    for move in move_groups[best]
+                ],
             }
             if accepted_move:
                 tokens[frame] = candidates[best]
