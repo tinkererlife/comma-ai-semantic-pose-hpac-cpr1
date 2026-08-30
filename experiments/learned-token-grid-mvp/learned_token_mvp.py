@@ -305,13 +305,24 @@ def official_metric_predictions(
         0, 1, 3, 4, 2
     ).contiguous()
     pair_chw = pair_bhwc.permute(0, 1, 4, 2, 3)
-    previous_cudnn_tf32 = torch.backends.cudnn.allow_tf32
-    torch.backends.cudnn.allow_tf32 = True
+    precision_api = getattr(torch.backends.cudnn, "conv", None)
+    use_new_api = precision_api is not None and hasattr(
+        precision_api, "fp32_precision"
+    )
+    if use_new_api:
+        previous_cudnn_tf32 = precision_api.fp32_precision
+        precision_api.fp32_precision = "tf32"
+    else:
+        previous_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+        torch.backends.cudnn.allow_tf32 = True
     try:
         seg_logits = segnet(segnet.preprocess_input(pair_chw))
         pose = posenet(posenet.preprocess_input(pair_chw))["pose"][:, :6]
     finally:
-        torch.backends.cudnn.allow_tf32 = previous_cudnn_tf32
+        if use_new_api:
+            precision_api.fp32_precision = previous_cudnn_tf32
+        else:
+            torch.backends.cudnn.allow_tf32 = previous_cudnn_tf32
     return seg_logits, pose
 
 

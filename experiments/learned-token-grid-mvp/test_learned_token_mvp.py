@@ -35,6 +35,7 @@ from learned_token_mvp import (
     token_rate_statistics,
     unpack_attempt_history,
 )
+from search_f24_hard_tokens import candidate_moves
 
 
 def test_renderer_curriculum_aligns_stage_parameters() -> None:
@@ -179,6 +180,20 @@ def test_projected_hpac_bits_use_official_rate_coefficient() -> None:
     assert projected_hpac_rate_score(8 * 191_052, 600) == (
         25.0 * 191_052 / 37_545_489
     )
+
+
+def test_f24_candidate_ranking_trades_distortion_for_enough_rate() -> None:
+    tokens = torch.zeros((1, 1), dtype=torch.long)
+    gradient = torch.tensor([[[0.0, 1e-4, -1e-5, 1.0, 1.0]]])
+    bits = torch.tensor([[[2_000.0, 0.0, 2_000.0, 2_000.0, 2_000.0]]])
+
+    move = candidate_moves(gradient, tokens, 1, bits)[0]
+
+    # Category 1 hurts the perception proxy, but its 2,000-bit saving is
+    # worth more on the official rate-distortion objective than category 2's
+    # small perception gain.
+    assert move[:4] == (0, 0, 0, 1)
+    assert move[4] > 0
 
 
 def test_rate_only_moves_are_spatially_separated() -> None:

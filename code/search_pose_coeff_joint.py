@@ -90,6 +90,10 @@ def main() -> None:
     parser.add_argument("--master-cache", type=Path, required=True)
     parser.add_argument("--init", type=Path, required=True)
     parser.add_argument("--top-k", type=int, default=64)
+    parser.add_argument(
+        "--exclude-pairs", type=int, nargs="*", default=[],
+        help="pair rows whose deployed frame-0 selector must remain frozen",
+    )
     parser.add_argument("--passes", type=int, default=2)
     parser.add_argument("--inner-iterations", type=int, default=3)
     parser.add_argument("--damping", type=float, default=0.01)
@@ -104,6 +108,10 @@ def main() -> None:
     args = parser.parse_args()
     if not 1 <= args.active_dimensions <= 6:
         raise ValueError("--active-dimensions must be in [1,6]")
+    if any(pair < 0 or pair >= N for pair in args.exclude_pairs):
+        raise ValueError("--exclude-pairs values must be in [0, 599]")
+    if args.top_k > N - len(set(args.exclude_pairs)):
+        raise ValueError("--top-k exceeds the number of unfrozen pairs")
 
     device = torch.device(args.device)
     sys.path.insert(0, str(args.challenge_root.resolve()))
@@ -141,7 +149,10 @@ def main() -> None:
         if pass_index == 0:
             print(json.dumps({"pass": 0, **summary}), flush=True)
             continue
-        selected = errors.argsort(descending=True)[:args.top_k].tolist()
+        ranking_errors = errors.clone()
+        if args.exclude_pairs:
+            ranking_errors[args.exclude_pairs] = -torch.inf
+        selected = ranking_errors.argsort(descending=True)[:args.top_k].tolist()
         accepted_rows = 0
         accepted_moves = 0
         improvement = 0.0

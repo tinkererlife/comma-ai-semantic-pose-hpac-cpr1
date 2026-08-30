@@ -65,10 +65,20 @@ def apply_codes(
     output: Path,
     *,
     replace_basis: bool = False,
+    experiment_book_root: Path | None = None,
 ) -> dict:
     payload = _payload(source)
     model_bytes, flags = parse_model_field(struct.unpack_from("<I", payload)[0])
     token_offset = 4 + model_bytes
+    if token_offset > len(payload):
+        if experiment_book_root is None:
+            raise ValueError("fixed F24S archives require --experiment-book-root")
+        return _apply_fixed_f24(
+            source,
+            checkpoint,
+            output,
+            experiment_book_root=experiment_book_root,
+        )
     bundle = decode_model_bundle(payload[4:token_offset], flags)
     source_basis_scales, source_basis_codes, source_coeff_scales, _ = decode_compact_carrier(
         bundle.carrier, BASIS_COUNT, FRAMES, DIMENSIONS
@@ -127,6 +137,116 @@ def apply_codes(
     }
 
 
+def _apply_fixed_f24(
+    source: Path,
+    checkpoint: Path,
+    output: Path,
+    *,
+    experiment_book_root: Path,
+) -> dict:
+    """Replace only F24S coefficient codes and rebuild its exact container."""
+    sys.path.insert(0, str(experiment_book_root / "src"))
+    from cpr1_sub4.baseline import BaselinePayload, encode_legacy_w4
+    from cpr1_sub4.carrier_repack import (
+        pack_frame0_selector_carrier,
+        split_frame0_selector_carrier,
+    )
+    from cpr1_sub4.entropy.coefficient_ar1_codec import decode_cap1, encode_cap1
+    from cpr1_sub4.entropy.renderer_weight_codec import decode_wans1
+    from cpr1_sub4.f14_renderer import F14_FILTERS
+    from cpr1_sub4.residual_archive import (
+        FIXED_SCHEMA,
+        build_residual_archive_bytes,
+        read_residual_archive,
+    )
+
+    parts = read_residual_archive(source)
+    cap1, selector = split_frame0_selector_carrier(parts.carrier_blob)
+    canonical = decode_cap1(cap1, frames=FRAMES, dimensions=DIMENSIONS)
+    basis_scales, basis_codes, coeff_scales, _ = decode_compact_carrier(
+        canonical, BASIS_COUNT, FRAMES, DIMENSIONS
+    )
+    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    codes = state["coeff_codes"].detach().cpu().numpy().astype(np.int32)
+    searched_scales = state["coeff_scales"].detach().cpu().numpy().astype("<f4")
+    if codes.shape != (FRAMES, DIMENSIONS):
+        raise ValueError("searched coefficient codes have the wrong shape")
+    if codes.min() < -2047 or codes.max() > 2047:
+        raise ValueError("searched coefficient code exceeds the signed int12 deployment range")
+    if not np.array_equal(searched_scales, coeff_scales):
+        raise ValueError("coefficient scales changed during search")
+    previous = np.vstack((np.zeros((1, DIMENSIONS), dtype=np.int32), codes[:-1]))
+    delta = ((codes - previous + 2048) & 0xFFF) - 2048
+    encoded = _zigzag_signed(delta, 12)
+    rebuilt_canonical = encode_compact_carrier(
+        basis_scales, basis_codes, coeff_scales, encoded
+    )
+    rebuilt_cap1, cap1_report = encode_cap1(
+        rebuilt_canonical, frames=FRAMES, dimensions=DIMENSIONS
+    )
+    wrapped = (
+        pack_frame0_selector_carrier(rebuilt_cap1, selector)
+        if selector is not None
+        else rebuilt_cap1
+    )
+    records = decode_wans1(parts.semantic_blob)
+    baseline = BaselinePayload(
+        archive_path=source,
+        semantic_blob=encode_legacy_w4(records),
+        carrier_blob=wrapped,
+        hpac_blob=parts.hpac_blob,
+        token_stream=parts.token_stream,
+        records=records,
+    )
+    archive, archive_report = build_residual_archive_bytes(
+        baseline,
+        parts.table,
+        parts.token_stream,
+        FIXED_SCHEMA,
+        hpac_blob=parts.hpac_blob,
+        semantic_blob=parts.semantic_blob,
+        carrier_blob=wrapped,
+        lzma_filters=F14_FILTERS,
+        fixed_wans_ar1_rc64_schema=True,
+        model_compression="raw",
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(archive)
+    restored = read_residual_archive(output)
+    restored_cap1, restored_selector = split_frame0_selector_carrier(
+        restored.carrier_blob
+    )
+    if (
+        restored.semantic_blob != parts.semantic_blob
+        or restored.hpac_blob != parts.hpac_blob
+        or restored.token_stream != parts.token_stream
+        or restored_selector != selector
+        or decode_cap1(restored_cap1, frames=FRAMES, dimensions=DIMENSIONS)
+        != rebuilt_canonical
+    ):
+        raise RuntimeError("fixed F24S component parity failed")
+    initial = state.get("initial_coeff_codes")
+    return {
+        "source_archive_bytes": source.stat().st_size,
+        "archive_bytes": output.stat().st_size,
+        "archive_delta_bytes": output.stat().st_size - source.stat().st_size,
+        "source_archive_sha256": _sha256(source.read_bytes()),
+        "archive_sha256": _sha256(output.read_bytes()),
+        "carrier_sha256": _sha256(rebuilt_canonical),
+        "basis_replaced": False,
+        "changed_basis_code_count": 0,
+        "changed_code_count": (
+            int((codes != initial.detach().cpu().numpy()).sum())
+            if initial is not None
+            else None
+        ),
+        "container": archive_report["model_container_schema"],
+        "cap1_bytes": len(rebuilt_cap1),
+        "selector_bytes": len(selector) if selector is not None else 0,
+        "cap1_report": cap1_report,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", type=Path, required=True)
@@ -134,12 +254,18 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--replace-basis", action="store_true")
+    parser.add_argument(
+        "--experiment-book-root",
+        type=Path,
+        help="required only for fixed F24S archives",
+    )
     args = parser.parse_args()
     result = apply_codes(
         args.archive,
         args.checkpoint,
         args.out,
         replace_basis=args.replace_basis,
+        experiment_book_root=args.experiment_book_root,
     )
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
