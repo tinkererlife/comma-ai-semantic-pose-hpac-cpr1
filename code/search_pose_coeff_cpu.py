@@ -71,6 +71,10 @@ def main() -> None:
     parser.add_argument("--master-cache", type=Path, required=True)
     parser.add_argument("--init", type=Path, required=True)
     parser.add_argument("--top-k", type=int, default=64)
+    parser.add_argument(
+        "--exclude-pairs", type=int, nargs="*", default=[],
+        help="pair rows whose deployed frame-0 selector must remain frozen",
+    )
     parser.add_argument("--passes", type=int, default=2)
     parser.add_argument(
         "--steps", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32]
@@ -82,6 +86,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--save", type=Path, required=True)
     args = parser.parse_args()
+    if any(pair < 0 or pair >= N for pair in args.exclude_pairs):
+        raise ValueError("--exclude-pairs values must be in [0, 599]")
 
     sys.path.insert(0, str(args.challenge_root.resolve()))
     import modules  # pylint: disable=import-error,import-outside-toplevel
@@ -137,9 +143,12 @@ def main() -> None:
             posenet, masters, targets, basis, coeff, args.eval_batch_size,
             device, args.amplitude,
         )
-        selected = current_mse.argsort(
-            descending=True
-        )[:args.top_k].tolist()
+        ranking_mse = current_mse.clone()
+        if args.exclude_pairs:
+            ranking_mse[args.exclude_pairs] = -torch.inf
+        selected = ranking_mse.argsort(descending=True)[
+            :min(args.top_k, N - len(set(args.exclude_pairs)))
+        ].tolist()
         accepted = 0
         improvement = 0.0
         for rank, pair_id in enumerate(selected, 1):
