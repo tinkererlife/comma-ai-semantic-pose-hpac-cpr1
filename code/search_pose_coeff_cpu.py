@@ -96,13 +96,24 @@ def main() -> None:
     masters = master_payload.get("masters", master_payload.get("frames"))
     initial = torch.load(args.init, map_location="cpu", weights_only=False)
     device = torch.device(args.device)
-    basis, basis_codes, basis_scales = quantize_basis(
-        initial["basis"].float().to(device), 8
+    exact_deployed_state = all(
+        key in initial for key in ("basis", "coeff_codes", "coeff_scales")
     )
-    coeff, coeff_codes, coeff_scales = quantize_coeff(
-        initial["coeff"].float().to(device), 12
-    )
-    coeff_codes = coeff_codes.to(torch.int16)
+    if exact_deployed_state:
+        basis = initial["basis"].float().to(device)
+        basis_codes = initial.get("basis_codes")
+        basis_scales = initial.get("basis_scales")
+        coeff_codes = initial["coeff_codes"].to(device=device, dtype=torch.int16)
+        coeff_scales = initial["coeff_scales"].float().to(device)
+        coeff = coeff_codes.float() * coeff_scales[None]
+    else:
+        basis, basis_codes, basis_scales = quantize_basis(
+            initial["basis"].float().to(device), 8
+        )
+        coeff, coeff_codes, coeff_scales = quantize_coeff(
+            initial["coeff"].float().to(device), 12
+        )
+        coeff_codes = coeff_codes.to(torch.int16)
 
     posenet = modules.PoseNet().eval().to(device)
     posenet.load_state_dict(
@@ -189,11 +200,13 @@ def main() -> None:
         history.append(record)
         print(json.dumps(record), flush=True)
         checkpoint = {
-            "basis": (
-                basis_codes.float()
-                * basis_scales[:, None, None, None]
-            ).cpu(),
+            "basis": basis.detach().cpu(),
             "coeff": coeff.cpu(),
+            "coeff_codes": coeff_codes.detach().cpu(),
+            "coeff_scales": coeff_scales.detach().cpu(),
+            "initial_coeff_codes": initial.get(
+                "initial_coeff_codes", initial["coeff_codes"]
+            ).detach().cpu() if exact_deployed_state else None,
             "result": {
                 "pair_ids": list(range(N)),
                 "quantized_basis_coeff": summarize(full_mse, 3e-5),
