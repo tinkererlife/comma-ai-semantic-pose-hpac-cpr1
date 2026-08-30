@@ -55,6 +55,7 @@ def repack_archive(
     semantic_codec: str,
     carrier_codec: str,
     carrier_from_archive: Path | None = None,
+    semantic_from_archive: Path | None = None,
 ) -> dict:
     payload = _read_payload(source)
     if len(payload) < 4:
@@ -67,7 +68,24 @@ def repack_archive(
     tokens = payload[token_offset:]
     bundle = decode_model_bundle(compressed, flags)
     original_carrier_sha256 = _sha256(bundle.carrier)
+    original_semantic_sha256 = _sha256(bundle.semantic)
     carrier_source_sha256 = None
+    semantic_source_sha256 = None
+    if semantic_from_archive is not None:
+        semantic_payload = _read_payload(semantic_from_archive)
+        if len(semantic_payload) < 4:
+            raise ValueError("semantic-source CPR1 payload is truncated")
+        source_bytes, source_flags = parse_model_field(
+            struct.unpack_from("<I", semantic_payload)[0]
+        )
+        source_end = 4 + source_bytes
+        if source_end > len(semantic_payload):
+            raise ValueError("semantic-source model length exceeds its payload")
+        semantic_source = decode_model_bundle(
+            semantic_payload[4:source_end], source_flags
+        )
+        bundle = replace(bundle, semantic=semantic_source.semantic)
+        semantic_source_sha256 = _sha256(semantic_from_archive.read_bytes())
     if carrier_from_archive is not None:
         carrier_payload = _read_payload(carrier_from_archive)
         if len(carrier_payload) < 4:
@@ -112,6 +130,11 @@ def repack_archive(
         ),
         "carrier_source_archive_sha256": carrier_source_sha256,
         "original_carrier_sha256": original_carrier_sha256,
+        "semantic_from_archive": (
+            str(semantic_from_archive.resolve()) if semantic_from_archive else None
+        ),
+        "semantic_source_archive_sha256": semantic_source_sha256,
+        "original_semantic_sha256": original_semantic_sha256,
         "token_codec": bundle.token_codec,
         "source_model_bytes": len(compressed),
         "model_bytes": len(rebuilt),
@@ -148,6 +171,11 @@ def main() -> None:
         type=Path,
         help="replace only the canonical carrier using another CPR1 archive",
     )
+    parser.add_argument(
+        "--semantic-from-archive",
+        type=Path,
+        help="replace only the canonical semantic renderer from another archive",
+    )
     args = parser.parse_args()
     result = repack_archive(
         args.archive,
@@ -155,6 +183,7 @@ def main() -> None:
         semantic_codec=args.semantic_codec,
         carrier_codec=args.carrier_codec,
         carrier_from_archive=args.carrier_from_archive,
+        semantic_from_archive=args.semantic_from_archive,
     )
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
