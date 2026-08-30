@@ -14,7 +14,7 @@ from hpac_token_search import (
     rank_token_moves,
 )
 from materialize_learned_cache import replace_tokens
-from replace_archive_tokens import replace_token_stream
+from replace_archive_tokens import LZMA_FILTERS, replace_token_stream
 from finetune_renderer_on_tokens import (
     archive_token_stream,
     build_training_stages,
@@ -402,6 +402,29 @@ def test_replace_token_stream_preserves_model_prefix(tmp_path) -> None:
     assert rebuilt[:7] == payload[:7]
     assert rebuilt[7:] == b"new!data"
     assert report["model_prefix_bytes"] == 7
+
+
+def test_replace_token_stream_supports_fixed_pr135_container(tmp_path) -> None:
+    import zipfile
+
+    models = b"F24S" + b"fixed-model"
+    compressed = lzma.compress(
+        models, format=lzma.FORMAT_RAW, filters=LZMA_FILTERS
+    )
+    prefix = compressed + bytes(96)
+    base = tmp_path / "base.zip"
+    with zipfile.ZipFile(base, "w") as archive:
+        archive.writestr("p", prefix + b"old-tokens")
+
+    output = tmp_path / "learned.zip"
+    report = replace_token_stream(
+        base, b"new-tokens", output, token_codec="rc64"
+    )
+    with zipfile.ZipFile(output) as archive:
+        rebuilt = archive.read("p")
+    assert rebuilt == prefix + b"new-tokens"
+    assert report["container"] == "fixed_implicit"
+    assert report["base_token_bytes"] == len(b"old-tokens")
 
 
 def test_replace_semantic_preserves_carrier_and_hpac(tmp_path) -> None:

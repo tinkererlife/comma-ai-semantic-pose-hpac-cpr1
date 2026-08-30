@@ -28,6 +28,25 @@ WANS1_MODEL_LENGTH_FLAG = 1 << 30
 CAP1_MODEL_LENGTH_FLAG = 1 << 29
 MODEL_LENGTH_MASK = (1 << 29) - 1
 STATE_CODEC_FLAGS = WANS1_MODEL_LENGTH_FLAG | CAP1_MODEL_LENGTH_FLAG
+FIXED_RC64_MODEL_MAGICS = (b"F16R", b"F21S", b"F24S")
+FIXED_RESIDUAL_BYTES = 2 + (25 * 5 * 6 + 7) // 8
+
+
+def fixed_rc64_token_offset(payload: bytes) -> int:
+    """Locate the token suffix in #135's implicit raw-LZMA container."""
+    decoder = lzma.LZMADecompressor(format=lzma.FORMAT_RAW, filters=LZMA_FILTERS)
+    models = decoder.decompress(payload)
+    if (
+        not decoder.eof
+        or not decoder.unused_data
+        or not models.startswith(FIXED_RC64_MODEL_MAGICS)
+    ):
+        raise ValueError("unsupported implicit CPR1 container")
+    compressed_bytes = len(payload) - len(decoder.unused_data)
+    token_offset = compressed_bytes + FIXED_RESIDUAL_BYTES
+    if token_offset >= len(payload):
+        raise ValueError("fixed CPR1 token stream is truncated")
+    return token_offset
 
 
 def replace_token_stream(
@@ -48,19 +67,28 @@ def replace_token_stream(
     model_bytes = model_field & MODEL_LENGTH_MASK
     state_codec_flags = model_field & STATE_CODEC_FLAGS
     token_offset = 4 + model_bytes
-    if token_offset > len(payload):
-        raise ValueError("model length exceeds CPR1 payload")
+    fixed_implicit = token_offset > len(payload)
+    if fixed_implicit:
+        token_offset = fixed_rc64_token_offset(payload)
+        model_bytes = token_offset
     if not tokens:
         raise ValueError("token stream must not be empty")
     if token_codec == "range32" and len(tokens) % 4:
         raise ValueError("range32 token stream must contain uint32 words")
 
-    output_model_field = model_bytes | state_codec_flags | (
-        RC64_MODEL_LENGTH_FLAG if token_codec == "rc64" else 0
-    )
-    model_prefix = struct.pack("<I", output_model_field) + payload[4:token_offset]
+    if fixed_implicit:
+        if token_codec != "rc64":
+            raise ValueError("fixed implicit CPR1 supports only RC64 tokens")
+        model_prefix = payload[:token_offset]
+    else:
+        output_model_field = model_bytes | state_codec_flags | (
+            RC64_MODEL_LENGTH_FLAG if token_codec == "rc64" else 0
+        )
+        model_prefix = struct.pack("<I", output_model_field) + payload[4:token_offset]
     preserved_model_bytes = None
     if semantic_blob is not None:
+        if fixed_implicit:
+            raise ValueError("semantic replacement is unsupported for fixed CPR1")
         if state_codec_flags:
             raise ValueError(
                 "semantic replacement requires a legacy semantic/carrier base archive"
@@ -103,6 +131,7 @@ def replace_token_stream(
         "base_token_bytes": len(payload) - token_offset,
         "learned_token_bytes": len(tokens),
         "token_codec": token_codec,
+        "container": "fixed_implicit" if fixed_implicit else "legacy",
         "semantic_replaced": semantic_blob is not None,
         "semantic_bytes": len(semantic_blob) if semantic_blob is not None else None,
         "preserved_model_bytes": preserved_model_bytes,
