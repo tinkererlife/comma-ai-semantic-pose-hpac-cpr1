@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import hashlib
 import json
 import struct
@@ -53,6 +54,7 @@ def repack_archive(
     *,
     semantic_codec: str,
     carrier_codec: str,
+    carrier_from_archive: Path | None = None,
 ) -> dict:
     payload = _read_payload(source)
     if len(payload) < 4:
@@ -64,6 +66,23 @@ def repack_archive(
     compressed = payload[4:token_offset]
     tokens = payload[token_offset:]
     bundle = decode_model_bundle(compressed, flags)
+    original_carrier_sha256 = _sha256(bundle.carrier)
+    carrier_source_sha256 = None
+    if carrier_from_archive is not None:
+        carrier_payload = _read_payload(carrier_from_archive)
+        if len(carrier_payload) < 4:
+            raise ValueError("carrier-source CPR1 payload is truncated")
+        source_bytes, source_flags = parse_model_field(
+            struct.unpack_from("<I", carrier_payload)[0]
+        )
+        source_end = 4 + source_bytes
+        if source_end > len(carrier_payload):
+            raise ValueError("carrier-source model length exceeds its payload")
+        carrier_source = decode_model_bundle(
+            carrier_payload[4:source_end], source_flags
+        )
+        bundle = replace(bundle, carrier=carrier_source.carrier)
+        carrier_source_sha256 = _sha256(carrier_from_archive.read_bytes())
     rebuilt, rebuilt_flags = encode_model_bundle(
         bundle, semantic_codec=semantic_codec, carrier_codec=carrier_codec
     )
@@ -88,6 +107,11 @@ def repack_archive(
         "saved_bytes": source.stat().st_size - output.stat().st_size,
         "semantic_codec": semantic_codec,
         "carrier_codec": carrier_codec,
+        "carrier_from_archive": (
+            str(carrier_from_archive.resolve()) if carrier_from_archive else None
+        ),
+        "carrier_source_archive_sha256": carrier_source_sha256,
+        "original_carrier_sha256": original_carrier_sha256,
         "token_codec": bundle.token_codec,
         "source_model_bytes": len(compressed),
         "model_bytes": len(rebuilt),
@@ -119,12 +143,18 @@ def main() -> None:
     parser.add_argument(
         "--carrier-codec", choices=("legacy", "cap1"), default="cap1"
     )
+    parser.add_argument(
+        "--carrier-from-archive",
+        type=Path,
+        help="replace only the canonical carrier using another CPR1 archive",
+    )
     args = parser.parse_args()
     result = repack_archive(
         args.archive,
         args.out,
         semantic_codec=args.semantic_codec,
         carrier_codec=args.carrier_codec,
+        carrier_from_archive=args.carrier_from_archive,
     )
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

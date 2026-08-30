@@ -112,13 +112,21 @@ def main() -> None:
     )
     masters = master_payload.get("masters", master_payload.get("frames"))
     initial = torch.load(args.init, map_location="cpu", weights_only=False)
-    basis, _, _ = quantize_basis(
-        initial["basis"].float().to(device), args.basis_bits
-    )
-    coeff, coeff_codes, coeff_scales = quantize_coeff(
-        initial["coeff"].float().to(device), 12
-    )
-    coeff_codes = coeff_codes.to(torch.int16)
+    if all(
+        key in initial for key in ("coeff_codes", "coeff_scales", "basis_codes")
+    ):
+        basis = initial["basis"].float().to(device)
+        coeff_codes = initial["coeff_codes"].to(device=device, dtype=torch.int16)
+        coeff_scales = initial["coeff_scales"].float().to(device)
+        coeff = coeff_codes.float() * coeff_scales[None]
+    else:
+        basis, _, _ = quantize_basis(
+            initial["basis"].float().to(device), args.basis_bits
+        )
+        coeff, coeff_codes, coeff_scales = quantize_coeff(
+            initial["coeff"].float().to(device), 12
+        )
+        coeff_codes = coeff_codes.to(torch.int16)
 
     posenet = modules.PoseNet().eval().to(device)
     posenet.load_state_dict(
@@ -151,6 +159,9 @@ def main() -> None:
         torch.save({
             "basis": basis.detach().cpu(),
             "coeff": coeff.detach().cpu(),
+            "coeff_codes": coeff_codes.detach().cpu(),
+            "coeff_scales": coeff_scales.detach().cpu(),
+            "initial_coeff_codes": coeff_codes.detach().cpu(),
             "result": result,
         }, args.save)
         print(json.dumps({
@@ -291,6 +302,9 @@ def main() -> None:
     torch.save({
         "basis": basis.detach().cpu(),
         "coeff": merged_coeff.detach().cpu(),
+        "coeff_codes": merged_codes.detach().cpu(),
+        "coeff_scales": coeff_scales.detach().cpu(),
+        "initial_coeff_codes": coeff_codes.detach().cpu(),
         "result": result,
     }, args.save)
     print(json.dumps({

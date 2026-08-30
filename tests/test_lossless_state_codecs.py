@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "code"))
 
 from cap1 import decode_cap1, encode_cap1  # noqa: E402
+from carrier_codec import decode_compact_carrier  # noqa: E402
 from model_bundle import (  # noqa: E402
     CAP1_MODEL_LENGTH_FLAG,
     RC64_MODEL_LENGTH_FLAG,
@@ -78,3 +79,38 @@ def test_repacked_archive_restores_every_canonical_byte(tmp_path):
         "hpac": True,
         "tokens": True,
     }
+
+
+def test_unchanged_searched_codes_rebuild_identical_archive(tmp_path):
+    extract_spec = importlib.util.spec_from_file_location(
+        "extract_pose_state", ROOT / "code/extract_deployed_pose_state.py"
+    )
+    assert extract_spec is not None and extract_spec.loader is not None
+    extract_module = importlib.util.module_from_spec(extract_spec)
+    extract_spec.loader.exec_module(extract_module)
+    apply_spec = importlib.util.spec_from_file_location(
+        "apply_carrier_codes",
+        ROOT / "experiments/lossless-state-codecs/apply_carrier_codes.py",
+    )
+    assert apply_spec is not None and apply_spec.loader is not None
+    apply_module = importlib.util.module_from_spec(apply_spec)
+    apply_spec.loader.exec_module(apply_module)
+
+    source = ROOT / "artifacts/final/archive.zip"
+    _, _, bundle = _canonical_bundle()
+    _, _, scales, encoded = decode_compact_carrier(
+        bundle.carrier, 12 * 3 * 24 * 32, 600, 12
+    )
+    codes = extract_module._absolute_codes(encoded)
+    checkpoint = tmp_path / "codes.pt"
+    import torch
+
+    torch.save({
+        "coeff_codes": torch.from_numpy(codes),
+        "coeff_scales": torch.from_numpy(scales.copy()),
+        "initial_coeff_codes": torch.from_numpy(codes.copy()),
+    }, checkpoint)
+    output = tmp_path / "rebuilt.zip"
+    report = apply_module.apply_codes(source, checkpoint, output)
+    assert output.read_bytes() == source.read_bytes()
+    assert report["changed_code_count"] == 0
