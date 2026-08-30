@@ -159,6 +159,9 @@ def main() -> None:
         args.save.parent.mkdir(parents=True, exist_ok=True)
         torch.save({
             "basis": basis.detach().cpu(),
+            "deployed_basis": basis.detach().cpu(),
+            "basis_codes": initial.get("basis_codes"),
+            "basis_scales": initial.get("basis_scales"),
             "coeff": coeff.detach().cpu(),
             "coeff_codes": coeff_codes.detach().cpu(),
             "coeff_scales": coeff_scales.detach().cpu(),
@@ -304,6 +307,9 @@ def main() -> None:
     args.save.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "basis": basis.detach().cpu(),
+        "deployed_basis": basis.detach().cpu(),
+        "basis_codes": initial.get("basis_codes"),
+        "basis_scales": initial.get("basis_scales"),
         "coeff": merged_coeff.detach().cpu(),
         "coeff_codes": merged_codes.detach().cpu(),
         "coeff_scales": coeff_scales.detach().cpu(),
