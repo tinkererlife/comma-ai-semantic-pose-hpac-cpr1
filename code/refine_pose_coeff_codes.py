@@ -112,9 +112,10 @@ def main() -> None:
     )
     masters = master_payload.get("masters", master_payload.get("frames"))
     initial = torch.load(args.init, map_location="cpu", weights_only=False)
-    if all(
+    exact_deployed_state = all(
         key in initial for key in ("coeff_codes", "coeff_scales", "basis_codes")
-    ):
+    )
+    if exact_deployed_state:
         basis = initial["basis"].float().to(device)
         coeff_codes = initial["coeff_codes"].to(device=device, dtype=torch.int16)
         coeff_scales = initial["coeff_scales"].float().to(device)
@@ -170,16 +171,17 @@ def main() -> None:
         }, indent=2), flush=True)
         return
     protected_codes = torch.zeros_like(coeff_codes, dtype=torch.bool)
-    for dimension in range(coeff_codes.shape[1]):
-        anchors = torch.nonzero(
-            coeff_codes[:, dimension].abs() == 2047,
-            as_tuple=False,
-        ).flatten()
-        if len(anchors) == 0:
-            raise RuntimeError(
-                f"coefficient dimension {dimension} has no scale anchor"
-            )
-        protected_codes[anchors[0], dimension] = True
+    if not exact_deployed_state:
+        for dimension in range(coeff_codes.shape[1]):
+            anchors = torch.nonzero(
+                coeff_codes[:, dimension].abs() == 2047,
+                as_tuple=False,
+            ).flatten()
+            if len(anchors) == 0:
+                raise RuntimeError(
+                    f"coefficient dimension {dimension} has no scale anchor"
+                )
+            protected_codes[anchors[0], dimension] = True
     ranking = baseline.argsort(descending=True)
     selected_ids = ranking[:args.top_k]
     selected_ids_device = selected_ids.to(device)
@@ -273,13 +275,14 @@ def main() -> None:
     merged_codes = coeff_codes.clone()
     merged_codes.index_copy_(0, selected_ids_device, best_codes)
     merged_coeff = merged_codes.float() * coeff_scales[None]
-    _, roundtrip_codes, _ = quantize_coeff(merged_coeff, 12)
-    if not torch.equal(
-        roundtrip_codes.to(torch.int16), merged_codes
-    ):
-        raise RuntimeError(
-            "coefficient scale anchors changed during refinement"
-        )
+    if not exact_deployed_state:
+        _, roundtrip_codes, _ = quantize_coeff(merged_coeff, 12)
+        if not torch.equal(
+            roundtrip_codes.to(torch.int16), merged_codes
+        ):
+            raise RuntimeError(
+                "coefficient scale anchors changed during refinement"
+            )
 
     final_mse = baseline.clone()
     final_mse[selected_ids] = best_mse
