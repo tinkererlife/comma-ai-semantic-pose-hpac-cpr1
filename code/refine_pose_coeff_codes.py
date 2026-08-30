@@ -113,7 +113,7 @@ def main() -> None:
     masters = master_payload.get("masters", master_payload.get("frames"))
     initial = torch.load(args.init, map_location="cpu", weights_only=False)
     exact_deployed_state = all(
-        key in initial for key in ("coeff_codes", "coeff_scales", "basis_codes")
+        key in initial for key in ("basis", "coeff_codes", "coeff_scales")
     )
     if exact_deployed_state:
         basis = initial["basis"].float().to(device)
