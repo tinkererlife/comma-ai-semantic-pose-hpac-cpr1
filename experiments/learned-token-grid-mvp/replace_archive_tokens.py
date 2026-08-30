@@ -24,6 +24,10 @@ LZMA_FILTERS = [{
     "depth": 0,
 }]
 RC64_MODEL_LENGTH_FLAG = 1 << 31
+WANS1_MODEL_LENGTH_FLAG = 1 << 30
+CAP1_MODEL_LENGTH_FLAG = 1 << 29
+MODEL_LENGTH_MASK = (1 << 29) - 1
+STATE_CODEC_FLAGS = WANS1_MODEL_LENGTH_FLAG | CAP1_MODEL_LENGTH_FLAG
 
 
 def replace_token_stream(
@@ -41,7 +45,8 @@ def replace_token_stream(
     if len(payload) < 4:
         raise ValueError("truncated CPR1 payload")
     model_field = struct.unpack_from("<I", payload)[0]
-    model_bytes = model_field & ~RC64_MODEL_LENGTH_FLAG
+    model_bytes = model_field & MODEL_LENGTH_MASK
+    state_codec_flags = model_field & STATE_CODEC_FLAGS
     token_offset = 4 + model_bytes
     if token_offset > len(payload):
         raise ValueError("model length exceeds CPR1 payload")
@@ -50,12 +55,16 @@ def replace_token_stream(
     if token_codec == "range32" and len(tokens) % 4:
         raise ValueError("range32 token stream must contain uint32 words")
 
-    output_model_field = model_bytes | (
+    output_model_field = model_bytes | state_codec_flags | (
         RC64_MODEL_LENGTH_FLAG if token_codec == "rc64" else 0
     )
     model_prefix = struct.pack("<I", output_model_field) + payload[4:token_offset]
     preserved_model_bytes = None
     if semantic_blob is not None:
+        if state_codec_flags:
+            raise ValueError(
+                "semantic replacement requires a legacy semantic/carrier base archive"
+            )
         models_raw = lzma.decompress(payload[4:token_offset])
         if len(models_raw) < 8:
             raise ValueError("truncated CPR1 model payload")

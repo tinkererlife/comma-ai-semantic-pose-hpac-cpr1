@@ -117,6 +117,8 @@ measure scientific novelty.
 | Integer-lattice HPAC inference | PR #86 uses the same backbone, but not this bounded integer execution path [4] | Integer convolutions/linears, dyadic requantization, bounded activations, and a 1/8-logit lattice [8] | **Original extension within this audited lineage** |
 | Canonical Huffman/Rice carrier repack | No equivalent found for this carrier in the audited predecessors | Exact basis/coeff repack, deterministic ZIP, decoded-state equality, and malformed-stream rejection [8, 9] | **Original artifact/codec engineering** |
 | RC64 five-symbol arithmetic coding | PR #135 and its public ExperimentBook [11] | Directly adapted as an optional lossless replacement for the inherited range32 token stream; the decoded token grid is required to remain exact | **Inherited from PR #135; not claimed as original** |
+| WANS1 fixed-schema renderer coding | PR #135 and its public ExperimentBook [11] | Directly adapted as an optional lossless representation; decoding restores the legacy renderer bytes exactly | **Inherited from PR #135; not claimed as original** |
+| CAP1 AR(1)+bias carrier coding | PR #135 and its public ExperimentBook [11] | Directly adapted as an optional lossless representation; decoding restores the canonical CPR1 carrier bytes exactly | **Inherited from PR #135; not claimed as original** |
 
 ## Claim boundaries
 
@@ -140,6 +142,7 @@ Claims not made:
 - “We invented asymmetric master/slave evaluator factorization.”
 - “We invented low-rank pose actuation.”
 - “We invented RC64 or its 63-bit five-symbol arithmetic coder.”
+- “We invented WANS1 or CAP1 state coding.”
 - “The whole decoder is bit-identical across GPUs.”
 - “The Ada result is an official T4 result.”
 

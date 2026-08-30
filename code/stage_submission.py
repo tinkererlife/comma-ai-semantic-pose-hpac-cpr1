@@ -18,6 +18,9 @@ RUNTIME_FILES = (
     "hpac_integer.py",
     "hpac_integer_sparse.py",
     "integer_model_io.py",
+    "model_bundle.py",
+    "wans1.py",
+    "cap1.py",
     "rc64.py",
     "rc64_backend.c",
 )

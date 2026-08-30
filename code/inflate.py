@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import lzma
 import math
 import os
 import struct
@@ -22,6 +21,7 @@ from carrier_codec import decode_compact_carrier
 from hpac_integer import IntegerHPAC
 from hpac_integer_sparse import SparseIntegerHPAC
 from integer_model_io import deserialize_integer_model
+from model_bundle import decode_model_bundle, parse_model_field
 
 
 N = 600
@@ -45,7 +45,6 @@ HPAC_LOGIT_PRECISION = 8
 HPAC_TARGET_MODE = "raw"
 HPAC_CODER_PERFECT = False
 HPAC_HIERARCHICAL = False
-RC64_MODEL_LENGTH_FLAG = 1 << 31
 HPAC_PACKED_SCHEMA = (
     ("conv_a.weight_q", (64, 7, 23), "i1"),
     ("conv_a.weight_scale", (64,), "<f2"),
@@ -692,23 +691,19 @@ def main():
     if len(payload) < 4:
         raise ValueError("combined payload is truncated before the model length")
     models_field = struct.unpack_from("<I", payload)[0]
-    token_codec = "rc64" if models_field & RC64_MODEL_LENGTH_FLAG else "range32"
-    models_bytes = models_field & ~RC64_MODEL_LENGTH_FLAG
+    models_bytes, model_flags = parse_model_field(models_field)
     if len(payload) <= 4 + models_bytes:
         raise ValueError("combined payload is truncated")
-    models_raw = lzma.decompress(payload[4:4 + models_bytes])
-    if len(models_raw) < 8:
-        raise ValueError("model bundle is truncated before semantic-pose lengths")
-    semantic_bytes, carrier_bytes = struct.unpack_from("<II", models_raw)
-    semantic_pose_bytes = 8 + semantic_bytes + carrier_bytes
-    if semantic_pose_bytes > len(models_raw):
-        raise ValueError("semantic-pose lengths exceed the model bundle")
-    semantic, basis, coeff = unpack_semantic_pose(
-        models_raw[:semantic_pose_bytes]
+    bundle = decode_model_bundle(payload[4:4 + models_bytes], model_flags)
+    semantic_pose = (
+        struct.pack("<II", len(bundle.semantic), len(bundle.carrier))
+        + bundle.semantic
+        + bundle.carrier
     )
-    hpac = load_hpac(models_raw[semantic_pose_bytes:], device)
+    semantic, basis, coeff = unpack_semantic_pose(semantic_pose)
+    hpac = load_hpac(bundle.hpac, device)
     tokens = decode_tokens(
-        hpac, payload[4 + models_bytes:], device, token_codec=token_codec
+        hpac, payload[4 + models_bytes:], device, token_codec=bundle.token_codec
     )
     del hpac
     torch.cuda.empty_cache()
