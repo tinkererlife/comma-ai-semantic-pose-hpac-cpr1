@@ -100,7 +100,7 @@ def main() -> None:
         key in initial for key in ("basis", "coeff_codes", "coeff_scales")
     )
     if exact_deployed_state:
-        basis = initial["basis"].float().to(device)
+        basis = initial.get("deployed_basis", initial["basis"]).float().to(device)
         basis_codes = initial.get("basis_codes")
         basis_scales = initial.get("basis_scales")
         coeff_codes = initial["coeff_codes"].to(device=device, dtype=torch.int16)

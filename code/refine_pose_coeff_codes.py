@@ -116,7 +116,7 @@ def main() -> None:
         key in initial for key in ("basis", "coeff_codes", "coeff_scales")
     )
     if exact_deployed_state:
-        basis = initial["basis"].float().to(device)
+        basis = initial.get("deployed_basis", initial["basis"]).float().to(device)
         coeff_codes = initial["coeff_codes"].to(device=device, dtype=torch.int16)
         coeff_scales = initial["coeff_scales"].float().to(device)
         coeff = coeff_codes.float() * coeff_scales[None]

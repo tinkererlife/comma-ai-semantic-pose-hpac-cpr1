@@ -120,7 +120,7 @@ def main() -> None:
     required = ("basis", "coeff_codes", "coeff_scales")
     if not all(key in initial for key in required):
         raise ValueError("joint search requires exact deployed carrier state")
-    basis = initial["basis"].float().to(device)
+    basis = initial.get("deployed_basis", initial["basis"]).float().to(device)
     codes = initial["coeff_codes"].to(device=device, dtype=torch.int16)
     initial_codes = initial.get("initial_coeff_codes", initial["coeff_codes"]).cpu()
     scales = initial["coeff_scales"].float().to(device)
