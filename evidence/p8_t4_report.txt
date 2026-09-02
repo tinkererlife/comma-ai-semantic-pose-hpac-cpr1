@@ -1,0 +1,13 @@
+=== Evaluation config ===
+  batch_size: 16
+  device: cuda
+  num_threads: 2
+  prefetch_queue_depth: 4
+  seed: 1234
+=== Evaluation results over 600 samples ===
+  Average PoseNet Distortion: 6.13140400674e-06
+  Average SegNet Distortion: 0.000291451375233
+  Submission file size: 185,653 bytes
+  Original uncompressed size: 37,545,489 bytes
+  Compression Rate: 0.00494474848896
+  Final score: 100*segnet_dist + sqrt(10*posenet_dist) + 25*rate = 0.160594177969

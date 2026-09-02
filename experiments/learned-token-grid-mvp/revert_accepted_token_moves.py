@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokens", type=Path, required=True)
     parser.add_argument("--history", type=Path, required=True)
     parser.add_argument("--eval-batch-size", type=int, default=16)
+    parser.add_argument("--rate-batch-size", type=int, default=8)
     parser.add_argument("--sweeps", type=int, default=2)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out-tokens", type=Path, required=True)
@@ -169,6 +170,7 @@ def main() -> None:
                 slaves[frame:frame + 1],
                 targets["seg"][frame],
                 targets["pose"][frame],
+                gate_batch,
                 device,
             )
             # The deployed RC64 encoder is teacher-forced one frame at a time.

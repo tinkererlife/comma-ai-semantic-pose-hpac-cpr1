@@ -25,8 +25,16 @@ def _quantized_weight(module) -> torch.Tensor:
     if module.self_compress_deployed:
         bits = ste_round(bits)
     radius = torch.pow(2.0, bits - 1.0)
-    low = _channel_view(module, -radius)
-    high = _channel_view(module, radius - 1.0)
+    low = _channel_view(
+        module,
+        torch.maximum(-radius, radius.new_full(radius.shape, -module.weight_bound)),
+    )
+    high = _channel_view(
+        module,
+        torch.minimum(
+            radius - 1.0, radius.new_full(radius.shape, module.weight_bound)
+        ),
+    )
     weight = ste_round(torch.maximum(torch.minimum(module.weight, high), low))
     if isinstance(module, IntegerConv2d):
         weight = weight * module.mask

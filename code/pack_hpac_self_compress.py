@@ -266,7 +266,44 @@ def main() -> None:
         actual = restored(current, idx, previous)
     max_diff = float((expected - actual).abs().max())
     if max_diff != 0.0:
-        raise RuntimeError(f"self-compressed round trip changed logits by {max_diff}")
+        mismatches = {}
+        restored_modules = dict(restored.named_modules())
+        for name, module in source.named_modules():
+            if not isinstance(module, COMPRESSIBLE_TYPES):
+                continue
+            other = restored_modules[name]
+            fields = []
+            for expected_field, actual_field in zip(
+                module.codes(), other.codes(), strict=True
+            ):
+                if expected_field is None:
+                    continue
+                expected_cpu = expected_field.detach().cpu()
+                actual_cpu = actual_field.detach().cpu()
+                delta = expected_cpu - actual_cpu
+                indices = (delta != 0).nonzero()[:8]
+                fields.append({
+                    "max": float(delta.abs().max()),
+                    "count": int((delta != 0).sum()),
+                    "indices": indices.tolist(),
+                    "expected": [float(expected_cpu[tuple(index)]) for index in indices],
+                    "actual": [float(actual_cpu[tuple(index)]) for index in indices],
+                })
+            if any(field["count"] for field in fields):
+                mismatches[name] = {
+                    "fields": fields,
+                    "depths": deployed_depths(module).tolist(),
+                }
+        frame_diff = float(
+            (source.frame_codes().detach().cpu()
+             - restored.frame_codes().detach().cpu()).abs().max()
+        )
+        if frame_diff:
+            mismatches["frame_embed"] = {"max": frame_diff}
+        raise RuntimeError(
+            "self-compressed round trip changed logits by "
+            f"{max_diff}; effective-code mismatches={mismatches}"
+        )
 
     blob = lzma.compress(raw, format=lzma.FORMAT_XZ, filters=LZMA_FILTERS)
     result = {

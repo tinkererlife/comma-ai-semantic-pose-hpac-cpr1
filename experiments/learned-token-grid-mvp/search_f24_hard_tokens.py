@@ -40,7 +40,14 @@ ORIGINAL_UNCOMPRESSED_BYTES = 37_545_489
 class F24RateOracle:
     """Exact quantized ideal bits for F24S current/next-frame token effects."""
 
-    def __init__(self, parts, renderer, runtime_root: Path, device: torch.device):
+    def __init__(
+        self,
+        parts,
+        renderer,
+        runtime_root: Path,
+        device: torch.device,
+        max_batch: int,
+    ):
         from runtime.hpac_inference import optimize_sparse_evaluator
         from runtime.ihs2 import materialize_ihs1
         from runtime.residual_archive import _boundary_buckets, _sparse_class
@@ -63,6 +70,7 @@ class F24RateOracle:
         ).to(device)
         self.boundary_buckets = _boundary_buckets
         self.device = device
+        self.max_batch = max_batch
 
     def _sparse(self, batch: int):
         sparse = self.sparse_by_batch.get(batch)
@@ -124,21 +132,31 @@ class F24RateOracle:
         baseline = self.frame_bits_batch(
             [frame], tokens[frame:frame + 1], previous[None]
         )[0]
-        proposed = self.frame_bits_batch(
-            [frame] * count,
-            candidates,
-            previous[None].expand(count, -1, -1),
-        )
+        proposed_chunks = []
+        for start in range(0, count, self.max_batch):
+            chunk = candidates[start:start + self.max_batch]
+            chunk_count = len(chunk)
+            proposed_chunks.append(self.frame_bits_batch(
+                [frame] * chunk_count,
+                chunk,
+                previous[None].expand(chunk_count, -1, -1),
+            ))
+        proposed = torch.cat(proposed_chunks)
         if frame + 1 < N_TOTAL_PAIRS:
             next_target = tokens[frame + 1:frame + 2]
             baseline += self.frame_bits_batch(
                 [frame + 1], next_target, tokens[frame:frame + 1]
             )[0]
-            proposed += self.frame_bits_batch(
-                [frame + 1] * count,
-                next_target.expand(count, -1, -1),
-                candidates,
-            )
+            next_chunks = []
+            for start in range(0, count, self.max_batch):
+                chunk = candidates[start:start + self.max_batch]
+                chunk_count = len(chunk)
+                next_chunks.append(self.frame_bits_batch(
+                    [frame + 1] * chunk_count,
+                    next_target.expand(chunk_count, -1, -1),
+                    chunk,
+                ))
+            proposed += torch.cat(next_chunks)
         return proposed - baseline
 
     @torch.no_grad()
@@ -206,11 +224,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--init-margin", type=float, default=0.25)
     parser.add_argument("--exclude-pairs", type=int, nargs="*", default=[])
     parser.add_argument("--eval-batch-size", type=int, default=16)
+    parser.add_argument("--candidate-batch-size", type=int, default=8)
+    parser.add_argument("--rate-batch-size", type=int, default=8)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out-tokens", type=Path, required=True)
     parser.add_argument("--out-report", type=Path, required=True)
     args = parser.parse_args()
-    if args.top_k < 1 or args.candidates_per_frame < 1 or args.sweeps < 1:
+    if (
+        args.top_k < 1
+        or args.candidates_per_frame < 1
+        or args.sweeps < 1
+        or args.candidate_batch_size < 1
+        or args.rate_batch_size < 1
+    ):
         raise ValueError("search sizes must be positive")
     if any(pair < 0 or pair >= N_TOTAL_PAIRS for pair in args.exclude_pairs):
         raise ValueError("--exclude-pairs values must be in [0, 599]")
@@ -259,7 +285,9 @@ def load_f24_state(args: argparse.Namespace, device: torch.device):
     }, strict=True)
     for parameter in semantic.parameters():
         parameter.requires_grad_(False)
-    rate_oracle = F24RateOracle(parts, renderer, runtime_root, device)
+    rate_oracle = F24RateOracle(
+        parts, renderer, runtime_root, device, args.rate_batch_size
+    )
     return (
         semantic.eval().to(device),
         basis.float(),
@@ -358,28 +386,34 @@ def exact_candidates(
     slave: torch.Tensor,
     seg_target: torch.Tensor,
     pose_target: torch.Tensor,
+    batch_size: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     candidates = token_grid[None].repeat(len(move_groups), 1, 1)
     for index, moves in enumerate(move_groups):
         for row, col, _, after, _ in moves:
             candidates[index, row, col] = after
-    ids = torch.full((len(move_groups),), frame, dtype=torch.long, device=device)
-    masters = semantic(candidates.to(device).long(), ids)
-    master_camera, _ = camera_and_seg_input(masters)
-    seg_logits, pose = official_metric_predictions(
-        segnet,
-        posenet,
-        slave.to(device).float().expand(len(move_groups), -1, -1, -1),
-        master_camera,
-    )
-    mismatches = (
-        seg_logits.argmax(1) != seg_target.to(device)[None]
-    ).reshape(len(move_groups), -1).sum(1).cpu()
-    pose_mse = (
-        pose - pose_target.to(device)[None]
-    ).square().mean(1).cpu()
-    return candidates, mismatches, pose_mse
+    mismatch_chunks = []
+    pose_chunks = []
+    for start in range(0, len(candidates), batch_size):
+        chunk = candidates[start:start + batch_size]
+        count = len(chunk)
+        ids = torch.full((count,), frame, dtype=torch.long, device=device)
+        masters = semantic(chunk.to(device).long(), ids)
+        master_camera, _ = camera_and_seg_input(masters)
+        seg_logits, pose = official_metric_predictions(
+            segnet,
+            posenet,
+            slave.to(device).float().expand(count, -1, -1, -1),
+            master_camera,
+        )
+        mismatch_chunks.append((
+            seg_logits.argmax(1) != seg_target.to(device)[None]
+        ).reshape(count, -1).sum(1).cpu())
+        pose_chunks.append((
+            pose - pose_target.to(device)[None]
+        ).square().mean(1).cpu())
+    return candidates, torch.cat(mismatch_chunks), torch.cat(pose_chunks)
 
 
 def score(seg_mismatches: float, pose_sum: float) -> float:
@@ -502,6 +536,7 @@ def main() -> None:
                 slaves[frame:frame + 1],
                 targets["seg"][frame],
                 targets["pose"][frame],
+                args.candidate_batch_size,
                 device,
             )
             old_seg = float(round(

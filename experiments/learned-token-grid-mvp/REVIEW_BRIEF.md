@@ -192,6 +192,21 @@ control, `-2.82%` versus #130, and still rank 3.  Its marginal gain was only
 about 16% of pass 1, evidence that this fixed proposal family is beginning to
 saturate.
 
+## Final #135-port result
+
+The learned grid was ported onto #135's complete lossless codec foundation and
+all perception-sensitive gates were repeated on the official T4 rail.  A
+T4-native carrier sync was followed by exact HPAC fine-tuning: three short
+runs were judged by packed model bytes plus a real RC64 stream, and only the
+winning 225-byte archive reduction was retained.  Re-running the token search
+under the new HPAC accepted 39 of 4,800 candidates and removed another seven
+real stream bytes while also improving aggregate SegNet and PoseNet distortion.
+
+The final 185,653-byte archive has SHA-256
+`0e496aea27948d23128fc9292655fc784715c6366d2d0fa582248a3d01f561bd`.
+The pinned full-precision T4 evaluator reports `0.160594177969`: 6.708% below
+#130 and 1.032% below #135, so it projects rank 1 pending public evaluation.
+
 ## Why this is still only a conservative MVP
 
 The grid contains 117,964,800 token positions.  The previous deployed artifact
@@ -208,8 +223,7 @@ rectangular proposals.  In particular, we did not implement:
   the fixed rectangular family;
 - exact final arithmetic-coded byte length inside every acceptance decision
   (the oracle matches deployed HPAC probabilities and ideal bits);
-- retraining HPAC for the changed token distribution;
-- a new codebook, decoder/world model or a port to the current #1 architecture.
+- a new codebook, decoder or world model.
 
 The previous phrase "full potential" should only be read as the measured result
 of this narrow implementation.  It is not an estimate of the idea's ceiling.

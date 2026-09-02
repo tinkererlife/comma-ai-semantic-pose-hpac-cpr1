@@ -112,6 +112,15 @@ def test_selected_hpac_checkpoint_reproduces_the_packed_model():
     assert len(raw) == 20_179
 
 
+def test_self_compressed_weights_respect_runtime_weight_bound():
+    model = IntegerHPAC(channels=4, patch=64, weight_bound=127)
+    enable_self_compression(model, init_bits=8.0)
+    set_deployed_bit_depths(model, True)
+    with torch.no_grad():
+        model.conv_a.weight[0, 0, 2, 3] = -128
+    assert model.conv_a.codes()[0][0, 0, 2, 3].item() == -127
+
+
 def test_final_token_stream_is_the_rebuilt_stream():
     _, _, old_tokens = base_components()
     selected = (

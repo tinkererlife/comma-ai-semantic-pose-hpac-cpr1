@@ -3,7 +3,7 @@
 This is the public reproducibility repository for
 [`semantic-pose-HPAC_CPR1`](https://github.com/commaai/comma_video_compression_challenge/pull/130).
 This fork learns a hard five-symbol token grid, searches exact one- and two-token rate-distortion moves, then losslessly ports [#135](https://github.com/commaai/comma_video_compression_challenge/pull/135)'s RC64 token coder.
-T4-native carrier tuning plus a reverse gate for five hardware-sensitive token pairs scores `0.160805408169` (`-6.585%` versus the exact T4 #130 control), projecting rank 1 by `0.001463` over #135.
+T4-native carrier tuning, exact HPAC fine-tuning and a final 39-token sweep score `0.160594177969` at 185,653 bytes (`-6.708%` versus #130), projecting rank 1 by `0.001674` over #135.
 It preserves two separate guarantees:
 
 1. a byte-exact rebuild of the frozen 191,052-byte CPR1 submission artifact;
@@ -18,7 +18,7 @@ The complete predecessor attribution and originality boundaries are in
 write-up is available at
 <https://fesalfayed.com/blog/semantic-pose-compression/>.
 
-The completed official 600-sample `linux-nvidia-t4` evaluation reports a
+The original frozen #130-line artifact's official 600-sample `linux-nvidia-t4` evaluation reports a
 full-precision score of `0.1677066352` (displayed as `0.17`).
 
 The canonical charged artifact is:

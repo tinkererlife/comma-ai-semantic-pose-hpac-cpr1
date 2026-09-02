@@ -26,6 +26,8 @@ cleanup() {
 trap cleanup EXIT
 
 cd "${ROOT}"
+# Retained manual GPU entrypoints: encode_f24_tokens.py,
+# materialize_exact_master_cache.py, and rebuild_f24_hpac.py.
 "${PYTHON_BIN}" scripts/audit_repo.py
 PYTHONPYCACHEPREFIX="${SCRATCH}/pycache" \
   "${PYTHON_BIN}" -m compileall -q code scripts tests
